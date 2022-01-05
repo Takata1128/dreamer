@@ -3,7 +3,15 @@ class Trainer(object):
         pass
 
     def collect_seed_episodes(self, env):
-        pass
+        s, done = env.reset(), False
+        for i in range(self.seed_steps):
+            a = env.action_space.sample()
+            ns, r, done, _ = env.step(a)
+            self.buffer.add(s, a, r, done)
+            if done:
+                s, done = env.reset(), False
+            else:
+                s = ns
 
     def train_batch(self, train_metrics):
         pass

@@ -92,3 +92,4 @@ class RecurrentStateSpaceModel(nn.Module):
         for t in range(seq_len):
             prev_action = action[t]
             prior_state, posterior_state = self.forward()
+            # TODO
