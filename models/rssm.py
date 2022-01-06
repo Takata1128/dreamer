@@ -16,6 +16,8 @@ class RecurrentStateSpaceModel(nn.Module):
         state_dim,
         action_dim,
         rnn_hidden_dim,
+        category_size=20,
+        class_size=20,
         hidden_dim=200,
         min_stddev=0.1,
         act=F.elu,
@@ -28,6 +30,8 @@ class RecurrentStateSpaceModel(nn.Module):
         self.rnn_hidden_dim = rnn_hidden_dim
         self.fc_state_action = nn.Linear(state_dim + action_dim, hidden_dim)
         self.fc_rnn_hidden = nn.Linear(rnn_hidden_dim, hidden_dim)
+        self.category_size = category_size
+        self.class_size = class_size
         self.fc_prior = nn.Sequential(
             nn.Linear(hidden_dim, node_size), act(), nn.Linear(node_size, state_dim)
         )
@@ -71,7 +75,7 @@ class RecurrentStateSpaceModel(nn.Module):
         # return Normal(mean, stddev), rnn_hidden
 
         prior_logit = self.fc_prior(hidden)
-        prior_stoch = get_stoch_state(prior_logit)
+        prior_stoch = self.get_stoch_state(prior_logit)
         return prior_logit, prior_stoch, rnn_hidden
 
     def posterior(self, rnn_hidden, embedded_obs):
@@ -83,7 +87,7 @@ class RecurrentStateSpaceModel(nn.Module):
         # stddev = F.softplus(self.fc_state_stddev_posterior(hidden)) + self._min_stddev
         # return Normal(mean, stddev)
         posterior_logit = self.fc_posterior(x)
-        posterior_stoch = get_stoch_state(posterior_logit)
+        posterior_stoch = self.get_stoch_state(posterior_logit)
         return posterior_logit, posterior_stoch, rnn_hidden
 
     def rollout_observation(self, seq_len, obs_embed, action, prev_rssm_state):
@@ -93,3 +97,22 @@ class RecurrentStateSpaceModel(nn.Module):
             prev_action = action[t]
             prior_state, posterior_state = self.forward()
             # TODO
+
+    def get_dist(self, logit):
+        shape = logit.shape
+        logit = torch.reshape(
+            logit, shape=(*shape[:-1], self.category_size, self.class_size)
+        )
+        return torch.distributions.Independent(
+            torch.distributions.OneHotCategoricalStraightThrough(logits=logit), 1
+        )
+
+    def get_stoch_state(self, logit):
+        shape = logit.shape
+        logit = torch.reshape(
+            logit, shape=(*shape[:-1], self.category_size, self.class_size)
+        )
+        dist = torch.distributions.OneHotCategorical(logits=logit)
+        stoch = dist.sample()
+        stoch += dist.probs - dist.probs.detach()
+        return torch.flatten(stoch, start_dim=-2, end_dim=-1)

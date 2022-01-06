@@ -24,6 +24,7 @@ class ActionModel(nn.Module):
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, hidden_dim)
         self.fc4 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc_action = nn.Linear(hidden_dim, action_dim)
         self.fc_mean = nn.Linear(hidden_dim, action_dim)
         self.fc_stddev = nn.Linear(hidden_dim, action_dim)
         self.act = act
@@ -39,6 +40,12 @@ class ActionModel(nn.Module):
         hidden = self.act(self.fc2(hidden))
         hidden = self.act(self.fc3(hidden))
         hidden = self.act(self.fc4(hidden))
+
+        logits = self.fc_action(hidden)
+        action_dist = torch.distributions.OneHotCategorical(logits=logits)
+        action = action_dist.sample()
+        action = action + action_dist.probs - action_dist.probs.detach()
+        return action, action_dist
 
         # Dreamerの実装に合わせて平均と分散に対する変換
         mean = self.fc_mean(hidden)
