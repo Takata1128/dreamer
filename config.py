@@ -18,7 +18,8 @@ class MinAtarConfig:
     action_dtype: np.dtype = np.float32
 
     # training desc
-    train_episodes: int = 100
+    seed_episodes: int = 100
+    train_episodes: int = 1000
     train_steps: int = int(5e6)
     train_every: int = 50
     collect_intervals: int = 5
@@ -26,10 +27,12 @@ class MinAtarConfig:
     chunk_length: int = 50
 
     # latent_space desc
-    embedding_size: int = 200
+    embedding_size: int = 1024
     rssm_node_size: int = 200
-    rnn_hidden_size: int = 200
-    state_dim: int = 20
+    rnn_hidden_dim: int = 200
+    class_size: int = 20
+    category_size: int = 20
+    state_dim: int = category_size * class_size
 
     # objective desc
     clip_grad_norm: float = 100.0
@@ -39,6 +42,9 @@ class MinAtarConfig:
     model_lr: float = 2e-4
     actor_lr: float = 4e-5
     critic_lr: float = 1e-4
+    eps: float = 1e-4
+    kl_loss_scale: float = 0.1
+    reward_loss_scale: float = 1.0
     kl_balance_scale: float = 0.8
     free_nats: float = 0.0
 

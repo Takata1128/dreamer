@@ -10,11 +10,8 @@ from trainer import Trainer
 from wrapper import GymMinAtar, OneHotAction
 
 
-seed = 1
-
-
 def main(args):
-    env_name = args.env_name
+    env_name = args.env
     exp_id = args.id
 
     np.random.seed(args.seed)
@@ -30,8 +27,6 @@ def main(args):
     action_size = env.action_space.shape[0]
     obs_dtype = bool
     action_dtype = np.float32
-    batch_size = args.batch_size
-    chunk_length = args.chunk_length
 
     config = MinAtarConfig(
         env=env_name,
@@ -39,8 +34,6 @@ def main(args):
         action_size=action_size,
         obs_dtype=obs_dtype,
         action_dtype=action_dtype,
-        chunk_length=chunk_length,
-        batch_size=batch_size,
     )
 
     trainer = Trainer(config, device)
@@ -49,20 +42,27 @@ def main(args):
     training loop
     """
 
-    trainer.collect_seed_episodes()
+    # ランダム方策でバッファに経験をためる
+    trainer.collect_seed_episodes(env)
 
+    # 学習ループ
     for episode in range(config.train_episodes):
         start = time.time()
         obs, done = env.reset(), False
         total_reward = 0
 
-        while not done:
-            action = policy(obs)
+        # １エピソード行動
+        total_reward = trainer.rollout_episode(env)
+
+        # NNのパラメータ更新
+        trainer.train_batch()
 
 
 if __name__ == "__main__":
-    parser = argparse
-    parser.add_argument("--env", type=str, help="mini atari env name")
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--env", type=str, default="breakout", help="mini atari env name"
+    )
     parser.add_argument("--id", type=str, default="0", help="Experiment ID")
     parser.add_argument("--seed", type=int, default=1, help="Random Seed")
     parser.add_argument("--no_cuda", action="store_false", help="Use GPU")

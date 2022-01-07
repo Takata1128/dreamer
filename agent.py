@@ -17,19 +17,22 @@ class Agent:
 
     def __call__(self, obs, training=True):
         # preprocessとchannel-first化
-        obs = preprocess_obs(obs)
+        # obs = preprocess_obs(obs)
         obs = torch.as_tensor(obs, device=self.device)
-        obs = obs.transpose(1, 2).transpose(0, 1).unsqueeze(0)
+        # obs = obs.transpose(1, 2).transpose(0, 1).unsqueeze(0)
+        obs = obs.unsqueeze(0)
 
         with torch.no_grad():
             # 観測を低次元に変換し,posteriorからのサンプルをActionModelに入力して行動を決定
             embedded_obs = self.encoder(obs)
-            state_posterior = self.rssm.posterior(self.rnn_hidden, embedded_obs)
-            state = state_posterior.sample()
-            action = self.action_model(state, self.rnn_hidden, training=training)
+            _, state, rnn_hidden = self.rssm.posterior(self.rnn_hidden, embedded_obs)
+            # state = state_posterior.sample()
+            action, action_dist = self.action_model(
+                state, self.rnn_hidden, training=training
+            )
 
             # 次のステップのためにRNNの隠れ状態を更新
-            _, self.rnn_hidden = self.rssm.prior(state, action, self.rnn_hidden)
+            _, _, self.rnn_hidden = self.rssm.prior(state, action, self.rnn_hidden)
 
         return action.squeeze().cpu().numpy()
 

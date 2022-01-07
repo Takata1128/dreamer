@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from torch import functional as F
+from torch.nn import functional as F
 from torch.distributions import Normal
 
 
@@ -32,9 +32,7 @@ class RecurrentStateSpaceModel(nn.Module):
         self.fc_rnn_hidden = nn.Linear(rnn_hidden_dim, hidden_dim)
         self.category_size = category_size
         self.class_size = class_size
-        self.fc_prior = nn.Sequential(
-            nn.Linear(hidden_dim, node_size), act(), nn.Linear(node_size, state_dim)
-        )
+        self.fc_prior = nn.Linear(hidden_dim, state_dim)
 
         # self.fc_state_mean_prior = nn.Linear(hidden_dim, state_dim)
         # self.fc_state_stddev_prior = nn.Linear(hidden_dim, state_dim)
@@ -42,11 +40,7 @@ class RecurrentStateSpaceModel(nn.Module):
         # self.fc_rnn_hidden_embedded_obs = nn.Linear(
         #     rnn_hidden_dim + embedding_size, hidden_dim
         # )
-        self.fc_posterior = nn.Sequential(
-            nn.Linear(rnn_hidden_dim + embedding_size, node_size),
-            act(),
-            nn.Linear(node_size, state_dim),
-        )
+        self.fc_posterior = nn.Linear(rnn_hidden_dim + embedding_size, state_dim)
         # self.fc_state_mean_posterior = nn.Linear(hidden_dim, state_dim)
         # self.fc_state_stddev_posterior = nn.Linear(hidden_dim, state_dim)
         self.rnn = nn.GRUCell(hidden_dim, rnn_hidden_dim)
@@ -58,9 +52,15 @@ class RecurrentStateSpaceModel(nn.Module):
         h_t+1 = f(h_t,s_t,a_t)
         prior p(s_t+1 | h_t+1) と posterior p(s_t+1 | h_t+1, o_t+1)を返す
         """
-        _, next_state_prior, _ = self.prior(state, action, rnn_hidden)
-        _, next_state_posterior, _ = self.posterior(rnn_hidden, embedded_next_obs)
-        return next_state_prior, next_state_posterior
+        ns_prior_logit, ns_prior, rnn_hidden = self.prior(state, action, rnn_hidden)
+        ns_posterior_logit, ns_posterior, _ = self.posterior(
+            rnn_hidden, embedded_next_obs
+        )
+        return (
+            (ns_prior_logit, ns_prior),
+            (ns_posterior_logit, ns_posterior),
+            rnn_hidden,
+        )
 
     def prior(self, state, action, rnn_hidden):
         """
