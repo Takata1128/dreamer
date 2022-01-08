@@ -25,14 +25,17 @@ class Agent:
         with torch.no_grad():
             # 観測を低次元に変換し,posteriorからのサンプルをActionModelに入力して行動を決定
             embedded_obs = self.encoder(obs)
-            _, state, rnn_hidden = self.rssm.posterior(self.rnn_hidden, embedded_obs)
+            posterior_logit, rnn_hidden = self.rssm.posterior(
+                self.rnn_hidden, embedded_obs
+            )
             # state = state_posterior.sample()
+            state = self.rssm.get_stoch_state(posterior_logit)
             action, action_dist = self.action_model(
                 state, self.rnn_hidden, training=training
             )
 
             # 次のステップのためにRNNの隠れ状態を更新
-            _, _, self.rnn_hidden = self.rssm.prior(state, action, self.rnn_hidden)
+            _, self.rnn_hidden = self.rssm.prior(state, action, self.rnn_hidden)
 
         return action.squeeze().cpu().numpy()
 

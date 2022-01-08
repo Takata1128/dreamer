@@ -11,6 +11,7 @@ from models.decoder import ObservationModel
 from models.reward_model import RewardModel
 from models.action_model import ActionModel
 from models.value_model import ValueModel
+from models.discount_model import DiscountModel
 from agent import Agent
 
 
@@ -19,6 +20,7 @@ class Trainer(object):
         self.device = device
         self.config = config
 
+        self.obs_shape = config.obs_shape
         self.state_dim = config.state_dim
         self.rnn_hidden_dim = config.rnn_hidden_dim
         self.action_size = config.action_size
@@ -64,6 +66,40 @@ class Trainer(object):
             total_reward += reward
         return total_reward
 
+    def observations_reconstruct(
+        self, state, rnn_hidden, embedded_obs, action, nonterms
+    ):
+        """
+        観測データからchunk_length分の観測を再構成
+        """
+        # 低次元の状態表現保持のためのTensor
+        states = torch.zeros(
+            self.chunk_length, self.batch_size, self.state_dim, device=self.device
+        )
+        rnn_hiddens = torch.zeros(
+            self.chunk_length,
+            self.batch_size,
+            self.rnn_hidden_dim,
+            device=self.device,
+        )
+        prior_logits = []
+        posterior_logits = []
+        for l in range(self.chunk_length - 1):
+            prev_action = action[l] * nonterms[l]
+            prev_state = state * nonterms[l]
+            prior_logit, posterior_logit, rnn_hidden = self.rssm(
+                prev_state, prev_action, rnn_hidden, embedded_obs[l]
+            )
+            states[l + 1] = self.rssm.get_stoch_state(posterior_logit)
+            rnn_hiddens[l + 1] = rnn_hidden
+            prior_logits.append(prior_logit)
+            posterior_logits.append(posterior_logit)
+
+        prior_logits = torch.stack(prior_logits, dim=0)
+        posterior_logits = torch.stack(prior_logits, dim=0)
+
+        return prior_logits, posterior_logits, states, rnn_hiddens
+
     def train_batch(self):
         for update_step in range(self.collect_intervals):
 
@@ -88,59 +124,20 @@ class Trainer(object):
                 observations.reshape(-1, *self.config.obs_shape)
             ).view(self.chunk_length, self.batch_size, -1)
 
-            # 低次元の状態表現保持のためのTensor
-            states = torch.zeros(
-                self.chunk_length, self.batch_size, self.state_dim, device=self.device
-            )
-            rnn_hiddens = torch.zeros(
-                self.chunk_length,
-                self.batch_size,
-                self.rnn_hidden_dim,
-                device=self.device,
-            )
-
             # 状態表現をゼロ初期化
             state = torch.zeros(self.batch_size, self.state_dim, device=self.device)
             rnn_hidden = torch.zeros(
                 self.batch_size, self.rnn_hidden_dim, device=self.device
             )
 
-            # priorとposterior間の KL-Loss
-            kl_loss = 0
-            for l in range(self.chunk_length - 1):
-                (
-                    (ns_prior_logit, ns_prior),
-                    (
-                        ns_posterior_logit,
-                        ns_posterior,
-                    ),
-                    rnn_hidden,
-                ) = self.rssm(
-                    state, actions[l], rnn_hidden, embedded_observations[l + 1]
-                )
-                prior_dist = self.rssm.get_dist(ns_prior_logit)
-                posterior_dist = self.rssm.get_dist(ns_posterior_logit)
-
-                state = ns_posterior
-                states[l + 1] = state
-                rnn_hiddens[l + 1] = rnn_hidden
-
-                alpha = self.kl_balance_scale
-                kl_lhs = torch.distributions.kl.kl_divergence(
-                    self.rssm.get_dist(ns_posterior_logit.detach()), prior_dist
-                )
-
-                kl_rhs = torch.distributions.kl.kl_divergence(
-                    posterior_dist, self.rssm.get_dist(ns_posterior_logit.detach())
-                )
-                # TODO KL誤差がfree_nats以下の時は無視
-
-                kl_loss += (
-                    alpha * kl_lhs.clamp(min=self.free_nats).mean()
-                    + (1 - alpha) * kl_rhs.clamp(min=self.free_nats).mean()
-                )
-
-            kl_loss /= self.chunk_length - 1
+            (
+                prior_logits,
+                posterior_logits,
+                states,
+                rnn_hiddens,
+            ) = self.observations_reconstruct(
+                state, rnn_hidden, embedded_observations, actions, non_terminals
+            )
 
             # states[0],rnn_hiddens[0]は捨てる（ゼロ初期化のため）
             states = states[1:]
@@ -150,11 +147,48 @@ class Trainer(object):
             flatten_states = states.view(-1, self.state_dim)
             flatten_rnn_hiddens = rnn_hiddens.view(-1, self.rnn_hidden_dim)
             recon_observations = self.decoder(flatten_states, flatten_rnn_hiddens).view(
-                self.chunk_length - 1, self.batch_size, 3, 64, 64
+                self.chunk_length - 1, self.batch_size, *self.obs_shape
             )
             predicted_rewards = self.reward_model(
                 flatten_states, flatten_rnn_hiddens
             ).view(self.chunk_length - 1, self.batch_size, 1)
+            predicted_discounts = self.discount_model(
+                flatten_states, flatten_rnn_hiddens
+            ).view(self.chunk_length - 1, self.batch_size, 1)
+
+            # priorとposterior間の KL-Loss
+            kl_loss = self._kl_loss(prior_logits, posterior_logits)
+            obs_loss = self._obs_loss(recon_observations, observations[1:])
+            reward_loss = self._reward_loss(predicted_rewards, rewards[:-1])
+            discount_loss = self._pcont_loss(predicted_discounts, non_terminals[:-1])
+
+            for l in range(self.chunk_length - 1):
+                prior_logit, posterior_logit, rnn_hidden = self.rssm(
+                    state, actions[l], rnn_hidden, embedded_observations[l + 1]
+                )
+                prior_dist = self.rssm.get_dist(prior_logit)
+                posterior_dist = self.rssm.get_dist(posterior_logit)
+
+                state = self.rssm.get_stoch_state(posterior_logit)
+                states[l + 1] = state
+                rnn_hiddens[l + 1] = rnn_hidden
+
+                alpha = self.kl_balance_scale
+                kl_lhs = torch.distributions.kl.kl_divergence(
+                    self.rssm.get_dist(posterior_logit.detach()), prior_dist
+                )
+
+                kl_rhs = torch.distributions.kl.kl_divergence(
+                    posterior_dist, self.rssm.get_dist(posterior_logit.detach())
+                )
+                # TODO KL誤差がfree_nats以下の時は無視
+
+                kl_loss += (
+                    alpha * kl_lhs.clamp(min=self.free_nats).mean()
+                    + (1 - alpha) * kl_rhs.clamp(min=self.free_nats).mean()
+                )
+
+            kl_loss /= self.chunk_length - 1
 
             # 観測と報酬の予測誤差を計算
             obs_loss = (
@@ -273,6 +307,9 @@ class Trainer(object):
             state_dim=state_dim, rnn_hidden_dim=rnn_hidden_dim
         )
         self.reward_model = RewardModel(
+            state_dim=state_dim, rnn_hidden_dim=rnn_hidden_dim
+        )
+        self.discount_model = DiscountModel(
             state_dim=state_dim, rnn_hidden_dim=rnn_hidden_dim
         )
 

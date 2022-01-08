@@ -52,21 +52,21 @@ class RecurrentStateSpaceModel(nn.Module):
         h_t+1 = f(h_t,s_t,a_t)
         prior p(s_t+1 | h_t+1) と posterior p(s_t+1 | h_t+1, o_t+1)を返す
         """
-        ns_prior_logit, ns_prior, rnn_hidden = self.prior(state, action, rnn_hidden)
-        ns_posterior_logit, ns_posterior, _ = self.posterior(
-            rnn_hidden, embedded_next_obs
-        )
+        ns_prior_logit, rnn_hidden = self.prior(state, action, rnn_hidden)
+        ns_posterior_logit, _ = self.posterior(rnn_hidden, embedded_next_obs)
         return (
-            (ns_prior_logit, ns_prior),
-            (ns_posterior_logit, ns_posterior),
+            ns_prior_logit,
+            ns_posterior_logit,
             rnn_hidden,
         )
 
-    def prior(self, state, action, rnn_hidden):
+    def prior(self, state, action, rnn_hidden, nonterms=True):
         """
         prior p(s_t+1|h_t+1)
         """
-        hidden = self.act(self.fc_state_action(torch.cat([state, action], dim=1)))
+        hidden = self.act(
+            self.fc_state_action(torch.cat([state * nonterms, action], dim=1))
+        )
         rnn_hidden = self.rnn(hidden, rnn_hidden)
         hidden = self.act(self.fc_rnn_hidden(rnn_hidden))
 
@@ -75,8 +75,7 @@ class RecurrentStateSpaceModel(nn.Module):
         # return Normal(mean, stddev), rnn_hidden
 
         prior_logit = self.fc_prior(hidden)
-        prior_stoch = self.get_stoch_state(prior_logit)
-        return prior_logit, prior_stoch, rnn_hidden
+        return prior_logit, rnn_hidden
 
     def posterior(self, rnn_hidden, embedded_obs):
         """
@@ -87,8 +86,7 @@ class RecurrentStateSpaceModel(nn.Module):
         # stddev = F.softplus(self.fc_state_stddev_posterior(hidden)) + self._min_stddev
         # return Normal(mean, stddev)
         posterior_logit = self.fc_posterior(x)
-        posterior_stoch = self.get_stoch_state(posterior_logit)
-        return posterior_logit, posterior_stoch, rnn_hidden
+        return posterior_logit, rnn_hidden
 
     def rollout_observation(self, seq_len, obs_embed, action, prev_rssm_state):
         priors = []
