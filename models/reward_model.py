@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
+import torch.distributions as td
 
 
 class RewardModel(nn.Module):
@@ -22,4 +23,4 @@ class RewardModel(nn.Module):
         hidden = self.act(self.fc2(hidden))
         hidden = self.act(self.fc3(hidden))
         reward = self.fc4(hidden)
-        return reward
+        return td.independent.Independent(td.Normal(reward, 1), 1)

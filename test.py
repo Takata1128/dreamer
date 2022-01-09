@@ -45,17 +45,42 @@ def main(args):
     # ランダム方策でバッファに経験をためる
     trainer.collect_seed_episodes(env)
 
+    start = time.time()
+    obs, done = env.reset(), False
+    total_reward = 0
+
     # 学習ループ
-    for episode in range(config.train_episodes):
-        start = time.time()
-        obs, done = env.reset(), False
-        total_reward = 0
-
-        # １エピソード行動
-        total_reward = trainer.rollout_episode(env)
-
+    for step in range(1, config.train_steps + 1):
         # NNのパラメータ更新
         trainer.train_batch()
+
+        with torch.no_grad():
+            embed = trainer.encoder(
+                torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(trainer.device)
+            )
+            prior_logit, posterior_logit, rnn_hidden = trainer.rssm(
+                state, action, rnn_hidden, embed
+            )
+            state = trainer.rssm.get_stoch_state(posterior_logit)
+            action, action_dist = trainer.action_model(state, rnn_hidden)
+            action = trainer.action_model.add_exploration(action, iter).detach()
+            action_ent = torch.mean(action_dist.entropy()).item()
+            episode_actor_ent.append(action_ent)
+
+        next_obs, rew, done, _ = env.step(action.squeeze(0).cpu().numpy())
+        score += rew
+
+        trainer.replay_buffer.push(obs, action.squeeze(0).cpu().numpy(), rew, done)
+        if done:
+            obs, score = env.reset(), 0
+            done = False
+            prev_state = torch.zeros(1, trainer.state_dim).to(trainer.device)
+            prev_action = torch.zero(1, trainer.action_size).to(trainer.device)
+            episode_actor_ent = []
+        else:
+            obs = next_obs
+            prev_state = state
+            prev_action = action
 
 
 if __name__ == "__main__":

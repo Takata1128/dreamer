@@ -1,22 +1,66 @@
+import numpy as np
 import torch
-from torch import nn
-from torch.nn import functional as F
+import torch.distributions as td
+import torch.nn as nn
 
 
-class ObservationModel(nn.Module):
-    def __init__(self, output_shape, embed_size, info):
+class ObsEncoder(nn.Module):
+    def __init__(self, input_shape, embedding_size):
+        """
+        :param input_shape: tuple containing shape of input
+        :param embedding_size: Supposed length of encoded vector
+        """
+        super(ObsEncoder, self).__init__()
+        self.shape = input_shape
+        activation = nn.ELU
+        d = 16
+        k = 1
+        self.k = k
+        self.d = d
+        self.convolutions = nn.Sequential(
+            nn.Conv2d(input_shape[0], d, k),
+            activation(),
+            nn.Conv2d(d, 2 * d, k),
+            activation(),
+            nn.Conv2d(2 * d, 4 * d, k),
+            activation(),
+        )
+        if embedding_size == self.embed_size:
+            self.fc_1 = nn.Identity()
+        else:
+            self.fc_1 = nn.Linear(self.embed_size, embedding_size)
+
+    def forward(self, obs):
+        batch_shape = obs.shape[:-3]
+        img_shape = obs.shape[-3:]
+        embed = self.convolutions(obs.reshape(-1, *img_shape))
+        embed = torch.reshape(embed, (*batch_shape, -1))
+        embed = self.fc_1(embed)
+        return embed
+
+    @property
+    def embed_size(self):
+        conv1_shape = conv_out_shape(self.shape[1:], 0, self.k, 1)
+        conv2_shape = conv_out_shape(conv1_shape, 0, self.k, 1)
+        conv3_shape = conv_out_shape(conv2_shape, 0, self.k, 1)
+        embed_size = int(4 * self.d * np.prod(conv3_shape).item())
+        return embed_size
+
+
+class ObsDecoder(nn.Module):
+    def __init__(self, output_shape, embed_size):
         """
         :param output_shape: tuple containing shape of output obs
         :param embed_size: the size of input vector, for dreamerv2 : modelstate
         """
-        super(ObservationModel, self).__init__()
+        super(ObsDecoder, self).__init__()
         c, h, w = output_shape
         activation = nn.ELU
-        d = info["depth"]
-        k = info["kernel"]
-        conv1_shape = conv_out_shape(output_shape[1:], 0, 3, 1)
-        conv2_shape = conv_out_shape(conv1_shape, 0, 3, 1)
-        conv3_shape = conv_out_shape(conv2_shape, 0, 3, 1)
+        d = 16
+        k = 3
+        conv1_shape = conv_out_shape(output_shape[1:], 0, k, 1)
+        conv2_shape = conv_out_shape(conv1_shape, 0, k, 1)
+        conv3_shape = conv_out_shape(conv2_shape, 0, k, 1)
         self.conv_shape = (4 * d, *conv3_shape)
         self.output_shape = output_shape
         if embed_size == np.prod(self.conv_shape).item():
@@ -61,27 +105,3 @@ def output_padding_shape(h_in, conv_out, padding, kernel_size, stride):
         output_padding(h_in[i], conv_out[i], padding, kernel_size, stride)
         for i in range(len(h_in))
     )
-
-
-class ObservationModel(nn.Module):
-    """
-    p(o_t|s_t,h_t)
-    低次元の状態表現から画像を再構成
-    """
-
-    def __init__(self, state_dim, rnn_hidden_dim):
-        super(ObservationModel, self).__init__()
-        self.fc = nn.Linear(state_dim + rnn_hidden_dim, 1024)
-        self.dc1 = nn.ConvTranspose2d(1024, 128, kernel_size=5, stride=2)
-        self.dc2 = nn.ConvTranspose2d(128, 64, kernel_size=5, stride=2)
-        self.dc3 = nn.ConvTranspose2d(64, 32, kernel_size=6, stride=2)
-        self.dc4 = nn.ConvTranspose2d(32, 3, kernel_size=6, stride=2)
-
-    def forward(self, state, rnn_hidden):
-        hidden = self.fc(torch.cat([state, rnn_hidden], dim=1))
-        hidden = hidden.view(hidden.size(0), 1024, 1, 1)
-        hidden = F.relu(self.dc1(hidden))
-        hidden = F.relu(self.dc2(hidden))
-        hidden = F.relu(self.dc3(hidden))
-        obs = self.dc4(hidden)
-        return obs

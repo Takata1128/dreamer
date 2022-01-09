@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
+import torch.distributions as td
 
 
 class DiscountModel(nn.Module):
@@ -10,7 +11,7 @@ class DiscountModel(nn.Module):
     """
 
     def __init__(self, state_dim, rnn_hidden_dim, hidden_dim=400, act=F.elu):
-        super(RewardModel, self).__init__()
+        super(DiscountModel, self).__init__()
         self.fc1 = nn.Linear(state_dim + rnn_hidden_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, hidden_dim)
@@ -22,4 +23,4 @@ class DiscountModel(nn.Module):
         hidden = self.act(self.fc2(hidden))
         hidden = self.act(self.fc3(hidden))
         discount = self.fc4(hidden)
-        return discount
+        return td.independent.Independent(td.Bernoulli(logits=discount), 1)

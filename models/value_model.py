@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
+import torch.distributions as td
 
 
 class ValueModel(nn.Module):
@@ -21,4 +22,4 @@ class ValueModel(nn.Module):
         hidden = self.act(self.fc2(hidden))
         hidden = self.act(self.fc3(hidden))
         state_value = self.fc4(hidden)
-        return state_value
+        return td.independent.Independent(td.Normal(state_value, 1), 1)
