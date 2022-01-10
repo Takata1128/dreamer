@@ -19,7 +19,10 @@ class RewardModel(nn.Module):
         self.act = act
 
     def forward(self, state, rnn_hidden):
-        hidden = self.act(self.fc1(torch.cat([state, rnn_hidden], dim=1)))
+        """
+        報酬を予測する正規分布を返す
+        """
+        hidden = self.act(self.fc1(torch.cat([state, rnn_hidden], dim=2)))
         hidden = self.act(self.fc2(hidden))
         hidden = self.act(self.fc3(hidden))
         reward = self.fc4(hidden)

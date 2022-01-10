@@ -50,7 +50,7 @@ class RecurrentStateSpaceModel(nn.Module):
     def forward(self, state, action, rnn_hidden, embedded_next_obs):
         """
         h_t+1 = f(h_t,s_t,a_t)
-        prior p(s_t+1 | h_t+1) と posterior p(s_t+1 | h_t+1, o_t+1)を返す
+        prior p(s_t+1 | h_t+1) と posterior p(s_t+1 | h_t+1, o_t+1)のロジットを返す
         """
         ns_prior_logit, rnn_hidden = self.prior(state, action, rnn_hidden)
         ns_posterior_logit, _ = self.posterior(rnn_hidden, embedded_next_obs)
@@ -97,6 +97,9 @@ class RecurrentStateSpaceModel(nn.Module):
             # TODO
 
     def get_dist(self, logit):
+        """
+        rssm状態(z)の分布を返却
+        """
         shape = logit.shape
         logit = torch.reshape(
             logit, shape=(*shape[:-1], self.category_size, self.class_size)
@@ -106,6 +109,9 @@ class RecurrentStateSpaceModel(nn.Module):
         )
 
     def get_stoch_state(self, logit):
+        """
+        ロジットからrssm状態（z）に
+        """
         shape = logit.shape
         logit = torch.reshape(
             logit, shape=(*shape[:-1], self.category_size, self.class_size)

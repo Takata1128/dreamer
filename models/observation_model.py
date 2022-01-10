@@ -3,6 +3,12 @@ import torch
 import torch.distributions as td
 import torch.nn as nn
 
+"""
+観測→低次元状態表現のエンコーダ
+低次元状態表現（＋RNNの隠れ状態）→観測のデコーダ
+参考元のモデルほぼコピペ
+"""
+
 
 class ObsEncoder(nn.Module):
     def __init__(self, input_shape, embedding_size):
@@ -31,6 +37,9 @@ class ObsEncoder(nn.Module):
             self.fc_1 = nn.Linear(self.embed_size, embedding_size)
 
     def forward(self, obs):
+        """
+        低次元のベクトルにエンコード
+        """
         batch_shape = obs.shape[:-3]
         img_shape = obs.shape[-3:]
         embed = self.convolutions(obs.reshape(-1, *img_shape))
@@ -75,7 +84,11 @@ class ObsDecoder(nn.Module):
             nn.ConvTranspose2d(d, c, k, 1),
         )
 
-    def forward(self, x):
+    def forward(self, state, rnn_hidden):
+        """
+        観測を再構成して分布を返す
+        """
+        x = torch.cat([state, rnn_hidden], dim=2)
         batch_shape = x.shape[:-1]
         embed_size = x.shape[-1]
         squeezed_size = np.prod(batch_shape).item()

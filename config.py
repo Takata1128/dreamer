@@ -6,6 +6,10 @@ from dataclasses import dataclass, field
 
 @dataclass
 class MinAtarConfig:
+    """
+    Trainingの設定
+    """
+
     # env desc
     env: str
     obs_shape: Tuple
@@ -18,16 +22,18 @@ class MinAtarConfig:
     action_dtype: np.dtype = np.float32
 
     # training desc
-    seed_episodes: int = 100
+    seed_episodes: int = 1000
     train_episodes: int = 1000
     train_steps: int = int(5e6)
     train_every: int = 50
     collect_intervals: int = 5
     batch_size: int = 50
     chunk_length: int = 50
+    save_every: int = int(1e5)
+    model_dir: str = "results"
 
     # latent_space desc
-    embedding_size: int = 1024
+    embedding_size: int = 200
     rssm_node_size: int = 200
     rnn_hidden_dim: int = 200
     class_size: int = 20
@@ -45,8 +51,15 @@ class MinAtarConfig:
     eps: float = 1e-4
     kl_loss_scale: float = 0.1
     reward_loss_scale: float = 1.0
+    discount_loss_scale: float = 5.0
     kl_balance_scale: float = 0.8
     free_nats: float = 0.0
+    slow_target_update: int = 100
 
-    # actor critic
+    # actor critic desc
     actor_entropy_scale: float = 1e-3
+
+    # exploration desc
+    train_noise: float = 0.4
+    expl_min: float = 0.05
+    expl_decay: float = 7000.0

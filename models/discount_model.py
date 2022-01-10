@@ -7,7 +7,7 @@ import torch.distributions as td
 class DiscountModel(nn.Module):
     """
     p(r_t|s_t,h_t)
-    低次元の状態表現から割引率（？）を予測
+    低次元の状態表現からエピソード終了を判定する0-1を予測(1エピソードが短いため？)
     """
 
     def __init__(self, state_dim, rnn_hidden_dim, hidden_dim=400, act=F.elu):
@@ -19,7 +19,10 @@ class DiscountModel(nn.Module):
         self.act = act
 
     def forward(self, state, rnn_hidden):
-        hidden = self.act(self.fc1(torch.cat([state, rnn_hidden], dim=1)))
+        """
+        エピソード終了を予測する0-1分布を返す
+        """
+        hidden = self.act(self.fc1(torch.cat([state, rnn_hidden], dim=2)))
         hidden = self.act(self.fc2(hidden))
         hidden = self.act(self.fc3(hidden))
         discount = self.fc4(hidden)

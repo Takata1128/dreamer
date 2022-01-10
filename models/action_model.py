@@ -31,10 +31,9 @@ class ActionModel(nn.Module):
         self.min_stddev = min_stddev
         self.init_stddev = init_stddev
 
-    def forward(self, state, rnn_hidden, training=False):
+    def forward(self, state, rnn_hidden):
         """
-        training=True: NNのパラメータに関して微分可能なかたちの行動のサンプル
-        training=False: 行動の確率分布の平均値
+        微分可能な行動のサンプルとその分布を出力
         """
         hidden = self.act(self.fc1(torch.cat([state, rnn_hidden], dim=1)))
         hidden = self.act(self.fc2(hidden))
@@ -46,16 +45,3 @@ class ActionModel(nn.Module):
         action = action_dist.sample()
         action = action + action_dist.probs - action_dist.probs.detach()
         return action, action_dist
-
-        # Dreamerの実装に合わせて平均と分散に対する変換
-        mean = self.fc_mean(hidden)
-        mean = 5.0 * torch.tanh(mean / 5.0)
-
-        stddev = self.fc_stddev(hidden)
-        stddev = F.softplus(stddev + self.init_stddev) + self.min_stddev
-
-        if training:
-            action = torch.tanh(Normal(mean, stddev).rsample())
-        else:
-            action = torch.tanh(mean)
-        return action

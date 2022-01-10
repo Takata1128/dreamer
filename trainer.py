@@ -1,9 +1,11 @@
+import os
 import torch
 import numpy as np
 from torch import optim
 from torch.nn.utils import clip_grad_norm_
 import torch.nn.functional as F
 from torch.distributions.kl import kl_divergence
+from utils import FreezeParameters
 from replay_buffer import ReplayBuffer, TransitionBuffer
 from models.rssm import RecurrentStateSpaceModel
 from models.observation_model import ObsEncoder, ObsDecoder
@@ -15,6 +17,10 @@ from agent import Agent
 
 
 class Trainer(object):
+    """
+    世界モデルとエージェントの学習を管理
+    """
+
     def __init__(self, config, device):
         self.device = device
         self.config = config
@@ -28,6 +34,7 @@ class Trainer(object):
         self.collect_intervals = config.collect_intervals
         self.seed_episodes = config.seed_episodes
         self.lambda_ = config.lambda_
+        self.discount = config.gamma
         self.horizon = config.horizon
         self.kl_balance_scale = config.kl_balance_scale
         self.kl_loss_scale = config.kl_loss_scale
@@ -39,7 +46,6 @@ class Trainer(object):
 
         self._model_initialize(config)
         self._optim_initialize(config)
-        self._agent_initialize()
 
     def collect_seed_episodes(self, env):
         """
@@ -54,17 +60,6 @@ class Trainer(object):
                 s, done = env.reset(), False
             else:
                 s = ns
-
-    def rollout_episode(self, env):
-        obs, done = env.reset(), False
-        total_reward = 0
-        while not done:
-            action = self.agent(torch.tensor(obs, dtype=torch.float32))
-            next_obs, reward, done, _ = env.step(action)
-            self.replay_buffer.push(obs, action, reward, done)
-            obs = next_obs
-            total_reward += reward
-        return total_reward
 
     def observations_reconstruct(
         self, state, rnn_hidden, embedded_obs, action, nonterms
@@ -96,13 +91,16 @@ class Trainer(object):
             posterior_logits.append(posterior_logit)
 
         prior_logits = torch.stack(prior_logits, dim=0)
-        posterior_logits = torch.stack(prior_logits, dim=0)
+        posterior_logits = torch.stack(posterior_logits, dim=0)
 
         return prior_logits, posterior_logits, states, rnn_hiddens
 
     def rollout_imagination(
         self, imagination_horizon, flatten_states, flatten_rnn_hiddens
     ):
+        """
+        RSSMにより想像上の軌道を生成
+        """
         imaginated_states = []
         imaginated_rnn_hiddens = []
         action_entropy = []
@@ -131,7 +129,7 @@ class Trainer(object):
             action_entropy,
         )
 
-    def train_batch(self):
+    def train_batch(self, train_metrics):
         """
         バッファからサンプルしたデータから世界モデルとエージェントを学習
         """
@@ -154,17 +152,19 @@ class Trainer(object):
             observations, actions, rewards, terminals = self.replay_buffer.sample(
                 batch_size=self.batch_size, chunk_length=self.chunk_length
             )
+            # データの前処理
             observations = torch.as_tensor(
                 observations, dtype=torch.float32, device=self.device
             )
             actions = torch.as_tensor(actions, dtype=torch.float32, device=self.device)
             rewards = torch.as_tensor(
-                actions, dtype=torch.float32, device=self.device
+                rewards, dtype=torch.float32, device=self.device
             ).unsqueeze(-1)
             non_terminals = torch.as_tensor(
                 1 - terminals, dtype=torch.float32, device=self.device
             ).unsqueeze(-1)
 
+            ### 世界モデルの更新 ###
             (
                 model_loss,
                 kl_loss,
@@ -185,10 +185,16 @@ class Trainer(object):
                 + list(self.decoder.parameters())
                 + list(self.reward_model.parameters())
             )
-            grad_norm_model = torch.nn.utils.clip_grad_norms_(model_params)
+            grad_norm_model = torch.nn.utils.clip_grad_norm_(
+                model_params, self.clip_grad_norm
+            )
             self.model_optimizer.step()
 
-            actor_loss, value_loss = self.actor_critic_loss(states, rnn_hiddens)
+            ### Actor-Criticモデルの更新 ###
+
+            actor_loss, value_loss, target_info = self.actor_critic_loss(
+                states, rnn_hiddens
+            )
 
             self.action_optimizer.zero_grad()
             self.value_optimizer.zero_grad()
@@ -197,79 +203,164 @@ class Trainer(object):
             value_loss.backward()
 
             grad_norm_actor = torch.nn.utils.clip_grad_norm_(
-                self.action_model.parameters()
+                self.action_model.parameters(), self.clip_grad_norm
             )
             grad_norm_value = torch.nn.utils.clip_grad_norm_(
-                self.value_model.parameters()
+                self.value_model.parameters(), self.clip_grad_norm
             )
 
             self.action_optimizer.step()
             self.value_optimizer.step()
 
+            with torch.no_grad():
+                prior_ent = torch.mean(prior_dist.entropy())
+                posterior_ent = torch.mean(post_dist.entropy())
+
+            prior_ent_l.append(prior_ent.item())
+            post_ent_l.append(posterior_ent.item())
+            actor_l.append(actor_loss.item())
+            value_l.append(value_loss.item())
+            obs_l.append(obs_loss.item())
+            model_l.append(model_loss.item())
+            reward_l.append(reward_loss.item())
+            kl_l.append(kl_loss.item())
+            pcont_l.append(pcont_loss.item())
+            mean_targ.append(target_info["mean_targ"])
+            min_targ.append(target_info["min_targ"])
+            max_targ.append(target_info["max_targ"])
+            std_targ.append(target_info["std_targ"])
+
+        train_metrics["model_loss"] = np.mean(model_l)
+        train_metrics["kl_loss"] = np.mean(kl_l)
+        train_metrics["reward_loss"] = np.mean(reward_l)
+        train_metrics["obs_loss"] = np.mean(obs_l)
+        train_metrics["value_loss"] = np.mean(value_l)
+        train_metrics["actor_loss"] = np.mean(actor_l)
+        train_metrics["prior_entropy"] = np.mean(prior_ent_l)
+        train_metrics["posterior_entropy"] = np.mean(post_ent_l)
+        train_metrics["pcont_loss"] = np.mean(pcont_l)
+        train_metrics["mean_targ"] = np.mean(mean_targ)
+        train_metrics["min_targ"] = np.mean(min_targ)
+        train_metrics["max_targ"] = np.mean(max_targ)
+        train_metrics["std_targ"] = np.mean(std_targ)
+
+        return train_metrics
+
     def actor_critic_loss(self, states, rnn_hiddens):
         """
         Actor Criticのロス計算
         """
+
+        # 勾配を遮断
         with torch.no_grad():
             flatten_states = states.view(-1, self.state_dim).detach()
             flatten_rnn_hiddens = rnn_hiddens.view(-1, self.rnn_hidden_dim).detach()
 
         # 世界モデルのパラメータは凍結
-        (
-            imaginated_states,
-            imaginated_rnn_hiddens,
-            imag_log_prob,
-            policy_entropy,
-        ) = self.rollout_imagination(self.horizon, flatten_states, flatten_rnn_hiddens)
+        with FreezeParameters(
+            [
+                self.encoder,
+                self.decoder,
+                self.rssm,
+                self.reward_model,
+                self.discount_model,
+            ]
+        ):
+            # 観測データから並列に想像上の軌道を生成
+            (
+                imaginated_states,
+                imaginated_rnn_hiddens,
+                imag_log_prob,
+                policy_entropy,
+            ) = self.rollout_imagination(
+                self.horizon, flatten_states, flatten_rnn_hiddens
+            )
 
-        # ActorCritic以外のパラメータは凍結
-        imag_reward_dist = self.reward_model(imaginated_states, imaginated_rnn_hiddens)
-        imag_reward = imag_reward_dist.mean
-        imag_value_dist = self.target_value_model(
-            imaginated_states, imaginated_rnn_hiddens
-        )
-        imag_value = imag_value_dist.mean
-        discount_dist = self.discount_model(imaginated_states, imaginated_rnn_hiddens)
-        discount_arr = self.discount * torch.round(discount_dist.base_dist.probs)
+        # Actor以外のパラメータは凍結
+        with FreezeParameters(
+            [
+                self.encoder,
+                self.decoder,
+                self.rssm,
+                self.reward_model,
+                self.discount_model,
+                self.value_model,
+                self.target_value_model,
+            ]
+        ):
+            # 想像上の軌道におけるreward,value,discount
+            imag_reward_dist = self.reward_model(
+                imaginated_states, imaginated_rnn_hiddens
+            )
+            imag_reward = imag_reward_dist.mean
+            imag_value_dist = self.target_value_model(
+                imaginated_states, imaginated_rnn_hiddens
+            )
+            imag_value = imag_value_dist.mean
+            discount_dist = self.discount_model(
+                imaginated_states, imaginated_rnn_hiddens
+            )
+            discount_arr = self.discount * torch.round(discount_dist.base_dist.probs)
 
+        # ロスを計算
         actor_loss, discount, lambda_returns = self._actor_loss(
             imag_reward, imag_value, discount_arr, imag_log_prob, policy_entropy
         )
         value_loss = self._value_loss(
             imaginated_states, imaginated_rnn_hiddens, discount, lambda_returns
         )
-        return actor_loss, value_loss
+
+        # lambda-targetのもろもろ
+        mean_target = torch.mean(lambda_returns, dim=1)
+        max_targ = torch.max(mean_target).item()
+        min_targ = torch.min(mean_target).item()
+        std_targ = torch.std(mean_target).item()
+        mean_targ = torch.mean(mean_target).item()
+
+        target_info = {
+            "min_targ": min_targ,
+            "max_targ": max_targ,
+            "std_targ": std_targ,
+            "mean_targ": mean_targ,
+        }
+
+        return actor_loss, value_loss, target_info
 
     def representation_loss(self, obs, actions, rewards, nonterms):
         """
         世界モデルのロス計算
         """
+        # 観測のエンコード
         embed = self.encoder(obs)
+
+        # rssm状態の初期値
         state = torch.zeros(self.batch_size, self.state_dim, device=self.device)
         rnn_hidden = torch.zeros(
             self.batch_size, self.rnn_hidden_dim, device=self.device
         )
 
-        prior_logits, posterior_logits, rnn_hiddens = self.observations_reconstruct(
-            state, rnn_hidden, embed, actions, nonterms
-        )
+        # サンプルしたデータからrssm状態を構築
+        (
+            prior_logits,
+            posterior_logits,
+            states,
+            rnn_hiddens,
+        ) = self.observations_reconstruct(state, rnn_hidden, embed, actions, nonterms)
 
-        posterior = self.rssm.get_stoch_state(posterior_logits)
-        flatten_posterior = posterior.view(-1, self.state_dim)
-        flatten_rnn_hiddens = rnn_hiddens.view(-1, self.rnn_hidden_dim)
+        # 観測、報酬、割引率（？）を再構成
+        obs_dist = self.decoder(states[:-1], rnn_hiddens[:-1])
+        reward_dist = self.reward_model(states[:-1], rnn_hiddens[:-1])
+        pcont_dist = self.discount_model(states[:-1], rnn_hiddens[:-1])
 
-        obs_dist = self.decoder(flatten_posterior, flatten_rnn_hiddens)
-        reward_dist = self.reward_model(flatten_posterior, flatten_rnn_hiddens)
-        pcont_dist = self.discount_model(flatten_posterior, flatten_rnn_hiddens)
-
+        # ロスを計算
         obs_loss = self._obs_loss(obs_dist, obs[:-1])
-        reward_loss = self._obs_loss(reward_dist, rewards[1:])
-        pcont_loss = self._obs_loss(pcont_dist, nonterms[1:])
+        reward_loss = self._reward_loss(reward_dist, rewards[1:])
+        pcont_loss = self._pcont_loss(pcont_dist, nonterms[1:])
         kl_loss, prior_dist, post_dist = self._kl_loss(prior_logits, posterior_logits)
 
         model_loss = (
             self.kl_loss_scale * kl_loss
-            + reward_loss
+            + self.reward_loss_scale * reward_loss
             + obs_loss
             + self.discount_loss_scale * pcont_loss
         )
@@ -282,14 +373,18 @@ class Trainer(object):
             pcont_loss,
             prior_dist,
             post_dist,
-            flatten_posterior,
-            flatten_rnn_hiddens,
+            states,
+            rnn_hiddens,
         )
 
     def _actor_loss(
         self, imag_reward, imag_value, discount_arr, imag_log_prob, policy_entropy
     ):
-        # λ-returnを計算
+        """
+        Actor-Loss: - ln pψ(a't | z't) sg(Vt^λ - vξ(z't)) - H[at|z't]
+        (Reinforceのみ)
+        """
+        # λ-returnを計算（参考元コピペ）
         def compute_return(
             reward: torch.Tensor,
             value: torch.Tensor,
@@ -339,6 +434,11 @@ class Trainer(object):
         return actor_loss, discount, lambda_returns
 
     def _value_loss(self, states, rnn_hiddens, discount, lambda_returns):
+        """
+        Critic-Loss
+        論文では二乗誤差だけど参考にした実装が対数尤度なのでそっちに従う
+        """
+
         with torch.no_grad():
             value_states = states[:-1].detach()
             value_rnn_hiddens = rnn_hiddens[:-1].detach()
@@ -352,10 +452,17 @@ class Trainer(object):
         return value_loss
 
     def _obs_loss(self, obs_dist, obs):
+        """
+        観測の対数尤度ロス
+        """
         obs_loss = -torch.mean(obs_dist.log_prob(obs))
         return obs_loss
 
     def _kl_loss(self, prior_logit, posterior_logit):
+        """
+        prior-posterior間のKL-divergence
+        kl-balancingあり
+        """
         prior_dist = self.rssm.get_dist(prior_logit)
         posterior_dist = self.rssm.get_dist(posterior_logit)
         alpha = self.kl_balance_scale
@@ -377,26 +484,52 @@ class Trainer(object):
         )
         return kl_loss, prior_dist, posterior_dist
 
-    def reward_loss(self, reward_dist, rewards):
+    def _reward_loss(self, reward_dist, rewards):
+        """
+        報酬の対数尤度ロス
+        """
         reward_loss = -torch.mean(reward_dist.log_prob(rewards))
         return reward_loss
 
     def _pcont_loss(self, pcont_dist, nonterms):
+        """
+        割引率（？）の対数尤度ロス
+        """
         pcont_target = nonterms.float()
         pcont_loss = -torch.mean(pcont_dist.log_prob(pcont_target))
         return pcont_loss
 
     def update_target(self):
+        """
+        valueモデルをtargetネットワークと同期
+        """
         for param, target in zip(
             self.value_model.parameters(), self.target_value_model.parameters()
         ):
-            target.data.copy(param.data)
+            target.data.copy_(param.data)
 
     def save_model(self, iter):
-        pass
+        """
+        全モデルの保存
+        """
+        save_dict = self.get_save_dict()
+        model_dir = self.config.model_dir
+        save_path = os.path.join(model_dir, "models_%d.pth" % iter)
+        torch.save(save_dict, save_path)
 
     def get_save_dict(self):
-        pass
+        """
+        全モデルのパラメータ
+        """
+        return {
+            "RSSM": self.rssm.state_dict(),
+            "Encoder": self.encoder.state_dict(),
+            "Decoder": self.decoder.state_dict(),
+            "RewardModel": self.reward_model.state_dict(),
+            "ActionModel": self.action_model.state_dict(),
+            "ValueModel": self.value_model.state_dict(),
+            "DiscountModel": self.discount_model.state_dict(),
+        }
 
     def load_save_dict(self, saved_dict):
         pass
@@ -430,26 +563,26 @@ class Trainer(object):
             rnn_hidden_dim,
             category_size,
             class_size,
-        )
+        ).to(self.device)
         self.action_model = ActionModel(
             state_dim=state_dim, rnn_hidden_dim=rnn_hidden_dim, action_dim=action_size
-        )
+        ).to(self.device)
         self.value_model = ValueModel(
             state_dim=state_dim, rnn_hidden_dim=rnn_hidden_dim
-        )
+        ).to(self.device)
         self.target_value_model = ValueModel(
             state_dim=state_dim, rnn_hidden_dim=rnn_hidden_dim
-        )
+        ).to(self.device)
         self.target_value_model.load_state_dict(self.value_model.state_dict())
         self.reward_model = RewardModel(
             state_dim=state_dim, rnn_hidden_dim=rnn_hidden_dim
-        )
+        ).to(self.device)
         self.discount_model = DiscountModel(
             state_dim=state_dim, rnn_hidden_dim=rnn_hidden_dim
-        )
+        ).to(self.device)
 
         self.encoder = ObsEncoder(self.obs_shape, embedding_size)
-        self.decoder = ObsDecoder(self.obs_shape, embedding_size)
+        self.decoder = ObsDecoder(self.obs_shape, state_dim + rnn_hidden_dim)
 
     def _optim_initialize(self, config):
         """
@@ -470,9 +603,3 @@ class Trainer(object):
         self.action_optimizer = optim.Adam(
             self.action_model.parameters(), lr=config.actor_lr, eps=config.eps
         )
-
-    def _agent_initialize(self):
-        self.agent = Agent(self.encoder, self.rssm, self.action_model)
-
-    def _print_summary(self):
-        pass
