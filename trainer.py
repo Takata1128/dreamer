@@ -61,35 +61,29 @@ class Trainer(object):
             else:
                 s = ns
 
-    def observations_reconstruct(
-        self, state, rnn_hidden, embedded_obs, action, nonterms
-    ):
+    def states_recounstruct(self, state, rnn_hidden, embedded_obs, action, nonterms):
         """
-        観測データからchunk_length分の観測を再構成
+        観測データからchunk_length分の状態表現を再構成
         """
         # 低次元の状態表現保持のためのTensor
-        states = torch.zeros(
-            self.chunk_length, self.batch_size, self.state_dim, device=self.device
-        )
-        rnn_hiddens = torch.zeros(
-            self.chunk_length,
-            self.batch_size,
-            self.rnn_hidden_dim,
-            device=self.device,
-        )
+        states = []
+        rnn_hiddens = []
         prior_logits = []
         posterior_logits = []
-        for l in range(self.chunk_length - 1):
+        prev_state = state
+        for l in range(self.chunk_length):
             prev_action = action[l] * nonterms[l]
-            prev_state = state * nonterms[l]
             prior_logit, posterior_logit, rnn_hidden = self.rssm(
-                prev_state, prev_action, rnn_hidden, embedded_obs[l]
+                prev_state, prev_action, rnn_hidden, embedded_obs[l], nonterms[l]
             )
-            states[l + 1] = self.rssm.get_stoch_state(posterior_logit)
-            rnn_hiddens[l + 1] = rnn_hidden
+            rnn_hiddens.append(rnn_hidden)
             prior_logits.append(prior_logit)
             posterior_logits.append(posterior_logit)
+            states.append(self.rssm.get_stoch_state(posterior_logit))
+            prev_state = states[-1]
 
+        states = torch.stack(states, dim=0)
+        rnn_hiddens = torch.stack(rnn_hiddens, dim=0)
         prior_logits = torch.stack(prior_logits, dim=0)
         posterior_logits = torch.stack(posterior_logits, dim=0)
 
@@ -345,9 +339,9 @@ class Trainer(object):
             posterior_logits,
             states,
             rnn_hiddens,
-        ) = self.observations_reconstruct(state, rnn_hidden, embed, actions, nonterms)
+        ) = self.states_recounstruct(state, rnn_hidden, embed, actions, nonterms)
 
-        # 観測、報酬、割引率（？）を再構成
+        # 観測、報酬、episode終了の0-1を再構成
         obs_dist = self.decoder(states[:-1], rnn_hiddens[:-1])
         reward_dist = self.reward_model(states[:-1], rnn_hiddens[:-1])
         pcont_dist = self.discount_model(states[:-1], rnn_hiddens[:-1])
@@ -474,14 +468,13 @@ class Trainer(object):
 
         kl_rhs = torch.mean(
             torch.distributions.kl.kl_divergence(
-                posterior_dist, self.rssm.get_dist(posterior_logit.detach())
+                posterior_dist, self.rssm.get_dist(prior_logit.detach())
             )
         )
         # KL誤差がfree_nats以下の時は無視
-        kl_loss = (
-            alpha * kl_lhs.clamp(min=self.free_nats).mean()
-            + (1 - alpha) * kl_rhs.clamp(min=self.free_nats).mean()
-        )
+        kl_lhs = torch.max(kl_lhs, kl_lhs.new_full(kl_lhs.size(), self.free_nats))
+        kl_rhs = torch.max(kl_rhs, kl_rhs.new_full(kl_rhs.size(), self.free_nats))
+        kl_loss = alpha * kl_lhs + (1 - alpha) * kl_rhs
         return kl_loss, prior_dist, posterior_dist
 
     def _reward_loss(self, reward_dist, rewards):
@@ -531,9 +524,6 @@ class Trainer(object):
             "DiscountModel": self.discount_model.state_dict(),
         }
 
-    def load_save_dict(self, saved_dict):
-        pass
-
     def _model_initialize(self, config):
         """
         世界モデルとエージェントのモデルを用意
@@ -581,8 +571,10 @@ class Trainer(object):
             state_dim=state_dim, rnn_hidden_dim=rnn_hidden_dim
         ).to(self.device)
 
-        self.encoder = ObsEncoder(self.obs_shape, embedding_size)
-        self.decoder = ObsDecoder(self.obs_shape, state_dim + rnn_hidden_dim)
+        self.encoder = ObsEncoder(self.obs_shape, embedding_size).to(self.device)
+        self.decoder = ObsDecoder(self.obs_shape, state_dim + rnn_hidden_dim).to(
+            self.device
+        )
 
     def _optim_initialize(self, config):
         """
@@ -593,6 +585,7 @@ class Trainer(object):
             + list(self.rssm.parameters())
             + list(self.decoder.parameters())
             + list(self.reward_model.parameters())
+            + list(self.discount_model.parameters())
         )
         self.model_optimizer = optim.Adam(
             self.model_params, lr=config.model_lr, eps=config.eps

@@ -21,7 +21,7 @@ class ValueModel(nn.Module):
         """
         Valueを予測する正規分布を返す
         """
-        hidden = self.act(self.fc1(torch.cat([state, rnn_hidden], dim=2)))
+        hidden = self.act(self.fc1(torch.cat([state, rnn_hidden], dim=-1)))
         hidden = self.act(self.fc2(hidden))
         hidden = self.act(self.fc3(hidden))
         state_value = self.fc4(hidden)

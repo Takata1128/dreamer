@@ -23,13 +23,12 @@ class MinAtarConfig:
 
     # training desc
     seed_episodes: int = 1000
-    train_episodes: int = 1000
-    train_steps: int = int(5e6)
+    train_steps: int = int(2e6)
     train_every: int = 50
     collect_intervals: int = 5
     batch_size: int = 50
     chunk_length: int = 50
-    save_every: int = int(1e5)
+    save_every: int = int(5e4)
     model_dir: str = "results"
 
     # latent_space desc
@@ -43,7 +42,7 @@ class MinAtarConfig:
     # objective desc
     clip_grad_norm: float = 100.0
     gamma: float = 0.99
-    lambda_: float = 0.99
+    lambda_: float = 0.95
     horizon: int = 10
     model_lr: float = 2e-4
     actor_lr: float = 4e-5
@@ -63,3 +62,6 @@ class MinAtarConfig:
     train_noise: float = 0.4
     expl_min: float = 0.05
     expl_decay: float = 7000.0
+
+    # eval desc
+    eval_episode: int = 50

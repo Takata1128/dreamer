@@ -1,0 +1,24 @@
+{
+    "os": "Linux-5.4.0-89-generic-x86_64-with-glibc2.29",
+    "python": "3.8.0",
+    "heartbeatAt": "2022-01-11T00:54:39.180052",
+    "startedAt": "2022-01-11T00:54:36.787114",
+    "docker": null,
+    "gpu": "Quadro RTX 8000",
+    "gpu_count": 1,
+    "cpu_count": 64,
+    "cuda": null,
+    "args": [],
+    "state": "running",
+    "program": "/root/mnt/dreamer/test.py",
+    "codePath": "test.py",
+    "git": {
+        "remote": "https://github.com/Takata1128/dreamer.git",
+        "commit": "f65bcd4c2b0fc0d232cebadf19ecc83d465efd9f"
+    },
+    "email": "t2130072@edu.cc.uec.ac.jp",
+    "root": "/root/mnt/dreamer",
+    "host": "8897426a1150",
+    "username": "root",
+    "executable": "/root/.pyenv/versions/3.8.0/bin/python"
+}

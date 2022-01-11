@@ -83,10 +83,12 @@ def main(args):
                 episode_actor_ent.append(action_ent)
             next_obs, rew, done, _ = env.step(action.squeeze(0).cpu().numpy())
             total_reward += rew
-            trainer.replay_buffer.push(obs, action.squeeze(0).cpu().numpy(), rew, done)
 
             # エピソード終了判定
             if done:
+                trainer.replay_buffer.push(
+                    obs, action.squeeze(0).cpu().numpy(), rew, done
+                )
                 train_metrics["train_rewards"] = total_reward
                 train_metrics["action_ent"] = np.mean(episode_actor_ent)
                 train_metrics["train_steps"] = step
@@ -104,6 +106,9 @@ def main(args):
                 done = False
                 episode_actor_ent = []
             else:
+                trainer.replay_buffer.push(
+                    obs, action.squeeze(0).detach().cpu().numpy(), rew, done
+                )
                 obs = next_obs
 
 

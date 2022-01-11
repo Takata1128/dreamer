@@ -10,14 +10,7 @@ class ActionModel(nn.Module):
     """
 
     def __init__(
-        self,
-        state_dim,
-        rnn_hidden_dim,
-        action_dim,
-        hidden_dim=400,
-        act=F.elu,
-        min_stddev=1e-4,
-        init_stddev=5.0,
+        self, state_dim, rnn_hidden_dim, action_dim, hidden_dim=400, act=F.elu
     ):
         super(ActionModel, self).__init__()
         self.fc1 = nn.Linear(state_dim + rnn_hidden_dim, hidden_dim)
@@ -28,10 +21,8 @@ class ActionModel(nn.Module):
         self.fc_mean = nn.Linear(hidden_dim, action_dim)
         self.fc_stddev = nn.Linear(hidden_dim, action_dim)
         self.act = act
-        self.min_stddev = min_stddev
-        self.init_stddev = init_stddev
 
-    def forward(self, state, rnn_hidden):
+    def forward(self, state, rnn_hidden, training=False):
         """
         微分可能な行動のサンプルとその分布を出力
         """

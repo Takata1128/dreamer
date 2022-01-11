@@ -22,7 +22,7 @@ class DiscountModel(nn.Module):
         """
         エピソード終了を予測する0-1分布を返す
         """
-        hidden = self.act(self.fc1(torch.cat([state, rnn_hidden], dim=2)))
+        hidden = self.act(self.fc1(torch.cat([state, rnn_hidden], dim=-1)))
         hidden = self.act(self.fc2(hidden))
         hidden = self.act(self.fc3(hidden))
         discount = self.fc4(hidden)
