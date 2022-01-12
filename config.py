@@ -23,7 +23,7 @@ class MinAtarConfig:
 
     # training desc
     seed_episodes: int = 1000
-    train_steps: int = int(2e6)
+    train_steps: int = int(5e6)
     train_every: int = 50
     collect_intervals: int = 5
     batch_size: int = 50

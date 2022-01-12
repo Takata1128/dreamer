@@ -9,7 +9,7 @@ class ValueModel(nn.Module):
     低次元の状態表現から状態価値を出力
     """
 
-    def __init__(self, state_dim, rnn_hidden_dim, hidden_dim=400, act=F.elu):
+    def __init__(self, state_dim, rnn_hidden_dim, hidden_dim=100, act=F.elu):
         super(ValueModel, self).__init__()
         self.fc1 = nn.Linear(state_dim + rnn_hidden_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)

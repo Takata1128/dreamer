@@ -53,9 +53,11 @@ def main(args):
 
     with wandb.init(project="mastering MinAtar with world models", config=config_dict):
         print("training start!")
+        start_t = time.time()
         train_metrics = {}
         obs, done = env.reset(), False
         total_reward = 0
+        episode_count = 0
         scores = []
         episode_actor_ent = []
         best_mean_score = 0
@@ -75,10 +77,9 @@ def main(args):
             if step % trainer.config.save_every == 0:
                 trainer.save_model(step)
 
-            # ステップ
+            # 1ステップ行動
             with torch.no_grad():
-                action, action_dist = agent(obs, not done)
-                action = agent.add_exploration(action, step).detach()
+                action, action_dist = agent(obs, not done, step)
                 action_ent = torch.mean(action_dist.entropy()).item()
                 episode_actor_ent.append(action_ent)
             next_obs, rew, done, _ = env.step(action.squeeze(0).cpu().numpy())
@@ -91,20 +92,26 @@ def main(args):
                 )
                 train_metrics["train_rewards"] = total_reward
                 train_metrics["action_ent"] = np.mean(episode_actor_ent)
-                train_metrics["train_steps"] = step
                 wandb.log(train_metrics, step=step)
                 scores.append(total_reward)
                 if len(scores) > 100:
                     scores.pop(0)
                     current_average = np.mean(scores)
                     if current_average > best_mean_score:
+                        best_t = time.time()
+                        elapsed = best_t - start_t
                         best_mean_score = current_average
-                        print("saving best model with mean score : ", best_mean_score)
+                        print(
+                            "time : {} ,step : {} ,episode : {} ,saving best model with mean score : {}".format(
+                                int(elapsed), step, episode_count, best_mean_score
+                            ),
+                        )
                         save_dict = trainer.get_save_dict()
                         torch.save(save_dict, best_save_path)
                 obs, total_reward = env.reset(), 0
                 done = False
                 episode_actor_ent = []
+                episode_count += 1
             else:
                 trainer.replay_buffer.push(
                     obs, action.squeeze(0).detach().cpu().numpy(), rew, done

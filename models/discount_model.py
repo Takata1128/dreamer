@@ -10,7 +10,7 @@ class DiscountModel(nn.Module):
     低次元の状態表現からエピソード終了を判定する0-1を予測(1エピソードが短いため？)
     """
 
-    def __init__(self, state_dim, rnn_hidden_dim, hidden_dim=400, act=F.elu):
+    def __init__(self, state_dim, rnn_hidden_dim, hidden_dim=100, act=F.elu):
         super(DiscountModel, self).__init__()
         self.fc1 = nn.Linear(state_dim + rnn_hidden_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)

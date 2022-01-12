@@ -19,7 +19,7 @@ class Agent:
         self.expl_min = config.expl_min
         self.expl_decay = config.expl_decay
 
-    def __call__(self, obs, nonterm, training=True):
+    def __call__(self, obs, nonterm, step, training=True):
         """
         actionとその分布を返却（勾配なし）
         """
@@ -27,14 +27,13 @@ class Agent:
         with torch.no_grad():
             # 観測を低次元に変換し,posteriorからのサンプルをActionModelに入力して行動を決定
             embedded_obs = self.encoder(obs)
-            posterior_logit, rnn_hidden = self.rssm.posterior(
-                self.rnn_hidden, embedded_obs
-            )
-            # state = state_posterior.sample()
+            posterior_logit = self.rssm.posterior(self.rnn_hidden, embedded_obs)
             state = self.rssm.get_stoch_state(posterior_logit)
-            action, action_dist = self.action_model(
-                state, self.rnn_hidden, training=training
-            )
+            action, action_dist = self.action_model(state, self.rnn_hidden)
+
+            # train時はたまにランダム行動をとる
+            if training:
+                action = self._add_exploration(action, step).detach()
 
             # 次のステップのためにRNNの隠れ状態を更新
             _, self.rnn_hidden = self.rssm.prior(
@@ -43,7 +42,7 @@ class Agent:
 
         return action, action_dist
 
-    def add_exploration(self, action, itr):
+    def _add_exploration(self, action, itr):
         """
         たまにランダム行動（Epsilon-greedy）
         参考実装どおりに実装
