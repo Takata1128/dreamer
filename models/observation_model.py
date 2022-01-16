@@ -20,7 +20,7 @@ class ObsEncoder(nn.Module):
         self.shape = input_shape
         activation = nn.ELU
         d = 16
-        k = 1
+        k = 3
         self.k = k
         self.d = d
         self.convolutions = nn.Sequential(

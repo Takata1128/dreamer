@@ -13,8 +13,8 @@ class RecurrentStateSpaceModel(nn.Module):
         self,
         node_size,
         embedding_size,
-        state_dim,
         action_dim,
+        state_dim,
         rnn_hidden_dim,
         category_size=20,
         class_size=20,
@@ -32,7 +32,7 @@ class RecurrentStateSpaceModel(nn.Module):
         # prior
         self.fc_state_action = nn.Linear(state_dim + action_dim, node_size)
         self.fc_rnn_hidden = nn.Linear(rnn_hidden_dim, node_size)
-        self.fc_prior = nn.Sequential(nn.Linear(node_size, state_dim))
+        self.fc_prior = nn.Linear(node_size, state_dim)
 
         # posterior
         self.fc_rnn_hidden_embedding = nn.Linear(

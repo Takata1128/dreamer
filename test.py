@@ -43,18 +43,21 @@ def main(args):
     )
 
     result_dir = os.path.join(config.model_dir, "{}_{}".format(env_name, exp_id))
-    model_dir = os.path.join(result_dir, "models")  # dir to save learnt models
+    model_dir = os.path.join(result_dir, "models")
     os.makedirs(model_dir, exist_ok=True)
 
+    config_dict = config.__dict__
     trainer = Trainer(config, device)
     agent = Agent(trainer.encoder, trainer.rssm, trainer.action_model, config)
-
-    config_dict = config.__dict__
 
     with wandb.init(project="mastering MinAtar with world models", config=config_dict):
         print("training start!")
         start_t = time.time()
         train_metrics = {}
+
+        # ランダム方策でバッファに経験をためる
+        trainer.collect_seed_episodes(env)
+
         obs, done = env.reset(), False
         total_reward = 0
         episode_count = 0
@@ -63,8 +66,6 @@ def main(args):
         best_mean_score = 0
         best_save_path = os.path.join(model_dir, "models_best.pth")
 
-        # ランダム方策でバッファに経験をためる
-        trainer.collect_seed_episodes(env)
         # 学習ループ
         for step in range(1, config.train_steps + 1):
             # NNのパラメータ更新
@@ -82,6 +83,7 @@ def main(args):
                 action, action_dist = agent(obs, not done, step)
                 action_ent = torch.mean(action_dist.entropy()).item()
                 episode_actor_ent.append(action_ent)
+
             next_obs, rew, done, _ = env.step(action.squeeze(0).cpu().numpy())
             total_reward += rew
 
@@ -110,6 +112,7 @@ def main(args):
                         torch.save(save_dict, best_save_path)
                 obs, total_reward = env.reset(), 0
                 done = False
+                agent.reset()  # rssmの内部状態をリセット
                 episode_actor_ent = []
                 episode_count += 1
             else:
@@ -124,8 +127,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--env", type=str, default="breakout", help="mini atari env name"
     )
-    parser.add_argument("--id", type=str, default="0", help="Experiment ID")
-    parser.add_argument("--seed", type=int, default=1, help="Random Seed")
+    parser.add_argument("--id", type=str, default="1", help="Experiment ID")
+    parser.add_argument("--seed", type=int, default=123, help="Random Seed")
     parser.add_argument("--no_cuda", action="store_true", help="Use GPU")
     args = parser.parse_args()
     main(args)

@@ -1,4 +1,5 @@
 from typing import Tuple
+import torch
 import numpy as np
 
 
@@ -64,6 +65,7 @@ class TransitionBuffer:
             chunk_length,
         )
         obs, act, rew, term = self._shift_sequences(obs, act, rew, term)
+
         return obs, act, rew, term
 
     def _shift_sequences(self, obs, actions, rewards, terminals):
@@ -132,6 +134,7 @@ class ReplayBuffer(object):
             batch_size, chunk_length, 1
         )
         sampled_done = self.done[sampled_indexes].reshape(batch_size, chunk_length, 1)
+
         return sampled_observations, sampled_actions, sampled_rewards, sampled_done
 
     def __len__(self):

@@ -3,18 +3,14 @@ import torch
 import numpy as np
 from torch import optim
 from torch import nn
-from torch.nn.utils import clip_grad_norm_
-import torch.nn.functional as F
-from torch.distributions.kl import kl_divergence
 from utils import FreezeParameters
-from replay_buffer import ReplayBuffer, TransitionBuffer
+from replay_buffer import TransitionBuffer
 from models.rssm import RecurrentStateSpaceModel
 from models.observation_model import ObsEncoder, ObsDecoder
 from models.reward_model import RewardModel
 from models.action_model import ActionModel
 from models.value_model import ValueModel
 from models.discount_model import DiscountModel
-from agent import Agent
 
 
 class Trainer(object):
@@ -82,18 +78,22 @@ class Trainer(object):
 
         for update_step in range(self.collect_intervals):
             # バッファから経験をサンプル ([chunk_length,batch_size,*])
+            # obs: [t,t+chunk_length]
+            # action,rewards,nonterms: [t-1,t+chunk_length-1]
+
             observations, actions, rewards, terminals = self.replay_buffer.sample(
                 batch_size=self.batch_size, chunk_length=self.chunk_length
             )
+
             # データの前処理
-            observations = torch.as_tensor(
+            observations = torch.tensor(
                 observations, dtype=torch.float32, device=self.device
             )
-            actions = torch.as_tensor(actions, dtype=torch.float32, device=self.device)
-            rewards = torch.as_tensor(
+            actions = torch.tensor(actions, dtype=torch.float32, device=self.device)
+            rewards = torch.tensor(
                 rewards, dtype=torch.float32, device=self.device
             ).unsqueeze(-1)
-            non_terminals = torch.as_tensor(
+            non_terminals = torch.tensor(
                 1 - terminals, dtype=torch.float32, device=self.device
             ).unsqueeze(-1)
 
@@ -123,13 +123,12 @@ class Trainer(object):
             self.model_optimizer.step()
 
             ### Actor-Criticモデルの更新 ###
-
             # 世界モデルの学習の際に推論したrssm状態を用いる
             actor_loss, value_loss, target_info = self.actor_critic_loss(
                 states, rnn_hiddens
             )
 
-            self.action_optimizer.zero_grad()
+            self.actor_optimizer.zero_grad()
             self.value_optimizer.zero_grad()
 
             actor_loss.backward()
@@ -140,7 +139,7 @@ class Trainer(object):
             )
             nn.utils.clip_grad_norm_(self.value_model.parameters(), self.clip_grad_norm)
 
-            self.action_optimizer.step()
+            self.actor_optimizer.step()
             self.value_optimizer.step()
 
             with torch.no_grad():
@@ -185,9 +184,11 @@ class Trainer(object):
 
         # 今までの勾配を遮断
         with torch.no_grad():
-            # [chunk,batch,*] -> [chunk*batch,*]
-            flatten_states = states.view(-1, self.state_dim).detach()
-            flatten_rnn_hiddens = rnn_hiddens.view(-1, self.rnn_hidden_dim).detach()
+            # [chunk,batch,*] -> [chunk-1*batch,*]
+            flatten_states = states[:-1].view(-1, self.state_dim).detach()
+            flatten_rnn_hiddens = (
+                rnn_hiddens[:-1].view(-1, self.rnn_hidden_dim).detach()
+            )
 
         # 世界モデルのパラメータは凍結
         with FreezeParameters(
@@ -203,13 +204,13 @@ class Trainer(object):
             (
                 imaginated_states,
                 imaginated_rnn_hiddens,
-                imag_log_prob,
+                imag_action_log_prob,
                 policy_entropy,
             ) = self.rollout_imagination(
                 self.horizon, flatten_states, flatten_rnn_hiddens
             )
 
-        # [horizon,chunk*batch,*]
+        # [horizon,chunk-1*batch,*]
 
         # Actor以外のパラメータは凍結
         with FreezeParameters(
@@ -237,9 +238,51 @@ class Trainer(object):
             )
             discount_arr = self.discount * torch.round(discount_dist.base_dist.probs)
 
+        # λ-returnを計算
+        def compute_return(
+            reward: torch.Tensor,
+            value: torch.Tensor,
+            discount: torch.Tensor,
+            bootstrap: torch.Tensor,
+            lambda_: float,
+        ):
+            """
+            バッチデータごとの割引報酬を計算
+            reward,value,discount,return:[horizon-1,batch,1]
+            bootstrap:[horizon-1,1]
+            """
+            next_values = torch.cat([value[1:], bootstrap[None]], 0)
+            target = reward + discount * next_values * (1 - lambda_)
+            timesteps = list(range(reward.shape[0] - 1, -1, -1))
+            outputs = []
+            accumulated_reward = bootstrap
+            # 逆から計算
+            for t in timesteps:
+                inp = target[t]
+                discount_factor = discount[t]
+                accumulated_reward = (
+                    inp + discount_factor * lambda_ * accumulated_reward
+                )
+                outputs.append(accumulated_reward)
+            # 最後で反転
+            returns = torch.flip(torch.stack(outputs), [0])
+            return returns
+
+        lambda_returns = compute_return(
+            imag_reward[:-1],
+            imag_value[:-1],
+            discount_arr[:-1],
+            bootstrap=imag_value[-1],
+            lambda_=self.lambda_,
+        )
+
+        # 割引率配列の設定
+        discount_arr = torch.cat([torch.ones_like(discount_arr[:1]), discount_arr[1:]])
+        discount = torch.cumprod(discount_arr[:-1], 0)
+
         # ロスを計算
-        actor_loss, discount, lambda_returns = self._actor_loss(
-            imag_reward, imag_value, discount_arr, imag_log_prob, policy_entropy
+        actor_loss = self._actor_loss(
+            lambda_returns, imag_value, discount, imag_action_log_prob, policy_entropy
         )
         value_loss = self._value_loss(
             imaginated_states, imaginated_rnn_hiddens, discount, lambda_returns
@@ -260,6 +303,88 @@ class Trainer(object):
         }
 
         return actor_loss, value_loss, target_info
+
+    def rollout_imagination(
+        self, imagination_horizon, flatten_states, flatten_rnn_hiddens
+    ):
+        """
+        RSSMにより想像上の軌道を生成
+        """
+        imaginated_states = []
+        imaginated_rnn_hiddens = []
+        action_entropy = []
+        imag_action_log_probs = []
+
+        for t in range(imagination_horizon):
+            # priorで未来予測しつつ行動
+            action, action_dist = self.action_model(
+                flatten_states.detach(), flatten_rnn_hiddens.detach()
+            )
+            flatten_states_prior_logits, flatten_rnn_hiddens = self.rssm.prior(
+                flatten_states, action, flatten_rnn_hiddens
+            )
+            flatten_states = self.rssm.get_stoch_state(flatten_states_prior_logits)
+
+            # 保存
+            imaginated_states.append(flatten_states)
+            imaginated_rnn_hiddens.append(flatten_rnn_hiddens)
+            action_entropy.append(action_dist.entropy())
+            imag_action_log_probs.append(
+                action_dist.log_prob(torch.round(action.detach()))
+            )
+
+        imaginated_states = torch.stack(imaginated_states, dim=0)
+        imaginated_rnn_hiddens = torch.stack(imaginated_rnn_hiddens, dim=0)
+        imag_action_log_probs = torch.stack(imag_action_log_probs, dim=0)
+        action_entropy = torch.stack(action_entropy, dim=0)
+
+        return (
+            imaginated_states,
+            imaginated_rnn_hiddens,
+            imag_action_log_probs,
+            action_entropy,
+        )
+
+    def _actor_loss(
+        self, lambda_returns, imag_value, discount, imag_action_log_prob, policy_entropy
+    ):
+        """
+        Actor-Loss: E [ sum_t=1..H-1{- ln pψ(a't | z't) sg(Vt^λ - vξ(z't)) - H[at|z't]}]
+        (Reinforceのみ)
+        """
+
+        advantage = (lambda_returns - imag_value[:-1]).detach()
+        objective = imag_action_log_prob[1:].unsqueeze(-1) * advantage
+
+        policy_entropy = policy_entropy[1:].unsqueeze(-1)
+        # ロスにdiscountをかけるのが何故かよくわかってないが、公式実装もそうしてるっぽいのでそうする
+        # より将来の確定的でないものを安くしてる？
+        actor_loss = -torch.sum(
+            torch.mean(
+                discount * (objective + self.actor_entropy_scale * policy_entropy),
+                dim=1,
+            )
+        )
+        return actor_loss
+
+    def _value_loss(self, states, rnn_hiddens, discount, lambda_returns):
+        """
+        Critic-Loss
+        valueの対数尤度ロス 論文上はMSEだけど等価（だと思ってる）
+        """
+
+        with torch.no_grad():
+            value_states = states[:-1].detach()
+            value_rnn_hiddens = rnn_hiddens[:-1].detach()
+            value_discount = discount.detach()
+            value_target = lambda_returns.detach()
+
+        value_dist = self.value_model(value_states, value_rnn_hiddens)
+        # ここもdiscountをかけてる
+        value_loss = -torch.mean(
+            value_discount * value_dist.log_prob(value_target).unsqueeze(-1)
+        )
+        return value_loss
 
     def representation_loss(self, obs, actions, rewards, nonterms):
         """
@@ -332,10 +457,10 @@ class Trainer(object):
             prev_state = self.rssm.get_stoch_state(posterior_logit)
 
             # 保存
+            states.append(prev_state)
             rnn_hiddens.append(rnn_hidden)
             prior_logits.append(prior_logit)
             posterior_logits.append(posterior_logit)
-            states.append(prev_state)
 
         states = torch.stack(states, dim=0)
         rnn_hiddens = torch.stack(rnn_hiddens, dim=0)
@@ -343,126 +468,6 @@ class Trainer(object):
         posterior_logits = torch.stack(posterior_logits, dim=0)
 
         return prior_logits, posterior_logits, states, rnn_hiddens
-
-    def rollout_imagination(
-        self, imagination_horizon, flatten_states, flatten_rnn_hiddens
-    ):
-        """
-        RSSMにより想像上の軌道を生成
-        """
-        imaginated_states = []
-        imaginated_rnn_hiddens = []
-        action_entropy = []
-        imag_action_log_probs = []
-
-        for t in range(imagination_horizon):
-            # priorで未来予測しつつ行動
-            action, action_dist = self.action_model(flatten_states, flatten_rnn_hiddens)
-            flatten_states_prior_logits, flatten_rnn_hiddens = self.rssm.prior(
-                flatten_states, action, flatten_rnn_hiddens
-            )
-            flatten_states = self.rssm.get_stoch_state(flatten_states_prior_logits)
-
-            # 保存
-            imaginated_states.append(flatten_states)
-            imaginated_rnn_hiddens.append(flatten_rnn_hiddens)
-            action_entropy.append(action_dist.entropy())
-            imag_action_log_probs.append(
-                action_dist.log_prob(torch.round(action.detach()))
-            )
-
-        imaginated_states = torch.stack(imaginated_states, dim=0)
-        imaginated_rnn_hiddens = torch.stack(imaginated_rnn_hiddens, dim=0)
-        imag_action_log_probs = torch.stack(imag_action_log_probs, dim=0)
-        action_entropy = torch.stack(action_entropy, dim=0)
-
-        return (
-            imaginated_states,
-            imaginated_rnn_hiddens,
-            imag_action_log_probs,
-            action_entropy,
-        )
-
-    def _actor_loss(
-        self, imag_reward, imag_value, discount_arr, imag_log_prob, policy_entropy
-    ):
-        """
-        Actor-Loss: - ln pψ(a't | z't) sg(Vt^λ - vξ(z't)) - H[at|z't]
-        (Reinforceのみ)
-        """
-        # λ-returnを計算
-        def compute_return(
-            reward: torch.Tensor,
-            value: torch.Tensor,
-            discount: torch.Tensor,
-            bootstrap: torch.Tensor,
-            lambda_: float,
-        ):
-            """
-            バッチデータごとの割引報酬を計算
-            reward,value,discount,return:[horizon-1,batch,1]
-            bootstrap:[horizon-1,1]
-            """
-            next_values = torch.cat([value[1:], bootstrap[None]], 0)
-            target = reward + discount * next_values * (1 - lambda_)
-            timesteps = list(range(reward.shape[0] - 1, -1, -1))
-            outputs = []
-            accumulated_reward = bootstrap
-            # 逆から計算
-            for t in timesteps:
-                inp = target[t]
-                discount_factor = discount[t]
-                accumulated_reward = (
-                    inp + discount_factor * lambda_ * accumulated_reward
-                )
-                outputs.append(accumulated_reward)
-            # 最後で反転
-            returns = torch.flip(torch.stack(outputs), [0])
-            return returns
-
-        lambda_returns = compute_return(
-            imag_reward[:-1],
-            imag_value[:-1],
-            discount_arr[:-1],
-            bootstrap=imag_value[-1],
-            lambda_=self.lambda_,
-        )
-        advantage = (lambda_returns - imag_value[:-1]).detach()
-        objective = imag_log_prob[1:].unsqueeze(-1) * advantage
-
-        # 割引率配列の設定
-        discount_arr = torch.cat([torch.ones_like(discount_arr[:1]), discount_arr[1:]])
-        discount = torch.cumprod(discount_arr[:-1], 0)
-
-        policy_entropy = policy_entropy[1:].unsqueeze(-1)
-        # ロスにdiscountをかけるのが何故かよくわかってないが、公式実装もそうしてるっぽいのでそうする
-        # より将来の確定的でないものを安くしてる？
-        actor_loss = -torch.sum(
-            torch.mean(
-                discount * (objective + self.actor_entropy_scale * policy_entropy),
-                dim=1,
-            )
-        )
-        return actor_loss, discount, lambda_returns
-
-    def _value_loss(self, states, rnn_hiddens, discount, lambda_returns):
-        """
-        Critic-Loss
-        valueの対数尤度ロス 論文上はMSEだけど等価（だと思ってる）
-        """
-
-        with torch.no_grad():
-            value_states = states[:-1].detach()
-            value_rnn_hiddens = rnn_hiddens[:-1].detach()
-            value_discount = discount.detach()
-            value_target = lambda_returns.detach()
-
-        value_dist = self.value_model(value_states, value_rnn_hiddens)
-        # ここもdiscountをかけてる
-        value_loss = -torch.mean(
-            value_discount * value_dist.log_prob(value_target).unsqueeze(-1)
-        )
-        return value_loss
 
     def _obs_loss(self, obs_dist, obs):
         """
@@ -491,8 +496,8 @@ class Trainer(object):
             )
         )
         # KL誤差がfree_nats以下の時は無視
-        kl_lhs = torch.max(kl_lhs, kl_lhs.new_full(kl_lhs.size(), self.free_nats))
-        kl_rhs = torch.max(kl_rhs, kl_rhs.new_full(kl_rhs.size(), self.free_nats))
+        # kl_lhs = torch.max(kl_lhs, kl_lhs.new_full(kl_lhs.size(), self.free_nats))
+        # kl_rhs = torch.max(kl_rhs, kl_rhs.new_full(kl_rhs.size(), self.free_nats))
         kl_loss = alpha * kl_lhs + (1 - alpha) * kl_rhs
         return kl_loss, prior_dist, posterior_dist
 
@@ -567,8 +572,8 @@ class Trainer(object):
         self.rssm = RecurrentStateSpaceModel(
             rssm_node_size,
             embedding_size,
-            state_dim,
             action_size,
+            state_dim,
             rnn_hidden_dim,
             category_size,
             class_size,
@@ -606,12 +611,10 @@ class Trainer(object):
             + list(self.reward_model.parameters())
             + list(self.discount_model.parameters())
         )
-        self.model_optimizer = optim.Adam(
-            self.model_params, lr=config.model_lr, eps=config.eps
-        )
+        self.model_optimizer = optim.Adam(self.model_params, lr=config.model_lr)
         self.value_optimizer = optim.Adam(
-            self.value_model.parameters(), lr=config.critic_lr, eps=config.eps
+            self.value_model.parameters(), lr=config.critic_lr
         )
-        self.action_optimizer = optim.Adam(
-            self.action_model.parameters(), lr=config.actor_lr, eps=config.eps
+        self.actor_optimizer = optim.Adam(
+            self.action_model.parameters(), lr=config.actor_lr
         )
