@@ -184,11 +184,9 @@ class Trainer(object):
 
         # 今までの勾配を遮断
         with torch.no_grad():
-            # [chunk,batch,*] -> [chunk-1*batch,*]
-            flatten_states = states[:-1].view(-1, self.state_dim).detach()
-            flatten_rnn_hiddens = (
-                rnn_hiddens[:-1].view(-1, self.rnn_hidden_dim).detach()
-            )
+            # [chunk,batch,*] -> [chunk*batch,*]
+            flatten_states = states.view(-1, self.state_dim).detach()
+            flatten_rnn_hiddens = rnn_hiddens.view(-1, self.rnn_hidden_dim).detach()
 
         # 世界モデルのパラメータは凍結
         with FreezeParameters(
@@ -210,7 +208,7 @@ class Trainer(object):
                 self.horizon, flatten_states, flatten_rnn_hiddens
             )
 
-        # [horizon,chunk-1*batch,*]
+        # [horizon,chunk*batch,*]
 
         # Actor以外のパラメータは凍結
         with FreezeParameters(
@@ -231,7 +229,7 @@ class Trainer(object):
             imag_reward = imag_reward_dist.mean
             imag_value_dist = self.target_value_model(
                 imaginated_states, imaginated_rnn_hiddens
-            )
+            )  # target計算にはtargetネットワークを用いる
             imag_value = imag_value_dist.mean
             discount_dist = self.discount_model(
                 imaginated_states, imaginated_rnn_hiddens
@@ -410,7 +408,9 @@ class Trainer(object):
         obs_loss = self._obs_loss(obs_dist, obs[:-1])  # 復元した状態と観測の間のロス
         reward_loss = self._reward_loss(reward_dist, rewards[1:])  # 次ステップの報酬との比較
         pcont_loss = self._pcont_loss(pcont_dist, nonterms[1:])  # 次ステップのdoneとの比較
-        kl_loss, prior_dist, post_dist = self._kl_loss(prior_logits, posterior_logits)
+        kl_loss, prior_dist, post_dist = self._kl_loss(
+            prior_logits, posterior_logits
+        )  # prior-posterior間のKL-Loss
 
         model_loss = (
             self.kl_loss_scale * kl_loss
@@ -530,7 +530,11 @@ class Trainer(object):
         全モデルの保存
         """
         save_dict = self.get_save_dict()
-        model_dir = self.config.model_dir
+        result_dir = os.path.join(
+            self.config.model_dir,
+            "{}_{}".format(self.config.env, self.config.id),
+        )
+        model_dir = os.path.join(result_dir, "models")
         save_path = os.path.join(model_dir, "models_%d.pth" % iter)
         torch.save(save_dict, save_path)
 

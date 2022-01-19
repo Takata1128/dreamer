@@ -12,9 +12,9 @@ class MinAtarConfig:
 
     # env desc
     env: str
+    id: int
     obs_shape: Tuple
     action_size: int
-    action_repeat: int = 1
 
     # buffer desc
     capacity: int = int(1e6)

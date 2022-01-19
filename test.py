@@ -36,6 +36,7 @@ def main(args):
     action_dtype = np.float32
     config = MinAtarConfig(
         env=env_name,
+        id=exp_id,
         obs_shape=obs_shape,
         action_size=action_size,
         obs_dtype=obs_dtype,
@@ -127,7 +128,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--env", type=str, default="breakout", help="mini atari env name"
     )
-    parser.add_argument("--id", type=str, default="1", help="Experiment ID")
+    parser.add_argument("--id", type=str, default="base", help="Experiment ID")
     parser.add_argument("--seed", type=int, default=123, help="Random Seed")
     parser.add_argument("--no_cuda", action="store_true", help="Use GPU")
     args = parser.parse_args()
