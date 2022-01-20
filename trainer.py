@@ -184,9 +184,9 @@ class Trainer(object):
 
         # 今までの勾配を遮断
         with torch.no_grad():
-            # [chunk,batch,*] -> [chunk*batch,*]
-            flatten_states = states.view(-1, self.state_dim).detach()
-            flatten_rnn_hiddens = rnn_hiddens.view(-1, self.rnn_hidden_dim).detach()
+            # [chunk,batch,*] -> [chunk-1*batch,*]
+            flatten_states = states[:-1].view(-1, self.state_dim).detach()
+            flatten_rnn_hiddens = rnn_hiddens[:-1].view(-1, self.rnn_hidden_dim).detach()
 
         # 世界モデルのパラメータは凍結
         with FreezeParameters(
@@ -208,7 +208,7 @@ class Trainer(object):
                 self.horizon, flatten_states, flatten_rnn_hiddens
             )
 
-        # [horizon,chunk*batch,*]
+        # [horizon,chunk-1*batch,*]
 
         # Actor以外のパラメータは凍結
         with FreezeParameters(
