@@ -88,7 +88,7 @@ class ObsDecoder(nn.Module):
         """
         観測を再構成して分布を返す
         """
-        x = torch.cat([state, rnn_hidden], dim=2)
+        x = torch.cat([state, rnn_hidden], dim=-1)
         batch_shape = x.shape[:-1]
         embed_size = x.shape[-1]
         squeezed_size = np.prod(batch_shape).item()

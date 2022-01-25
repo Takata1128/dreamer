@@ -2,6 +2,10 @@ import minatar
 import gym
 import numpy as np
 
+"""
+https://github.com/RajGhugare19/dreamerv2/blob/main/dreamerv2/utils/wrapper.py
+"""
+
 
 class GymMinAtar(gym.Env):
     metadata = {"render.modes": ["human", "rgb_array"]}
@@ -66,3 +70,14 @@ class OneHotAction(gym.Wrapper):
         reference = np.zeros(actions, dtype=np.float32)
         reference[index] = 1.0
         return reference
+
+
+class breakoutPOMDP(gym.ObservationWrapper):
+    def __init__(self, env):
+        """index 2 (trail) is removed, which gives ball's direction"""
+        super(breakoutPOMDP, self).__init__(env)
+        c, h, w = env.observation_space.shape
+        self.observation_space = gym.spaces.MultiBinary((c - 1, h, w))
+
+    def observation(self, observation):
+        return np.stack([observation[0], observation[1], observation[3]], axis=0)

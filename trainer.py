@@ -177,6 +177,138 @@ class Trainer(object):
 
         return train_metrics
 
+    def representation_loss(self, obs, actions, rewards, nonterms):
+        """
+        世界モデルのロス計算
+        """
+        # 観測のエンコード
+        embed = self.encoder(obs)
+
+        # サンプルしたデータからrssm状態を構築
+        (
+            prior_logits,
+            posterior_logits,
+            states,
+            rnn_hiddens,
+        ) = self.predict_states(embed, actions, nonterms)
+
+        # 観測、報酬、episode終了の0-1を再構成
+        obs_dist = self.decoder(states[:-1], rnn_hiddens[:-1])
+        reward_dist = self.reward_model(states[:-1], rnn_hiddens[:-1])
+        pcont_dist = self.discount_model(states[:-1], rnn_hiddens[:-1])
+
+        # ロスを計算
+        obs_loss = self._obs_loss(obs_dist, obs[:-1])  # 復元した状態と観測の間のロス
+        reward_loss = self._reward_loss(reward_dist, rewards[1:])  # 次ステップの報酬との比較
+        pcont_loss = self._pcont_loss(pcont_dist, nonterms[1:])  # 次ステップのdoneとの比較
+        kl_loss, prior_dist, post_dist = self._kl_loss(
+            prior_logits, posterior_logits
+        )  # prior-posterior間のKL-Loss
+
+        model_loss = (
+            self.kl_loss_scale * kl_loss
+            + self.reward_loss_scale * reward_loss
+            + obs_loss
+            + self.discount_loss_scale * pcont_loss
+        )
+
+        return (
+            model_loss,
+            kl_loss,
+            obs_loss,
+            reward_loss,
+            pcont_loss,
+            prior_dist,
+            post_dist,
+            states,
+            rnn_hiddens,
+        )
+
+    def predict_states(self, embedded_obs, action, nonterms):
+        """
+        観測データを取り込んでchunk_length分の状態表現を推論
+        """
+        # 低次元の状態表現保持のためのTensor
+        states = []
+        rnn_hiddens = []
+        prior_logits = []
+        posterior_logits = []
+
+        # rssm状態の初期値
+        state = torch.zeros(self.batch_size, self.state_dim, device=self.device)
+        rnn_hidden = torch.zeros(
+            self.batch_size, self.rnn_hidden_dim, device=self.device
+        )
+
+        prev_state = state
+        for l in range(self.chunk_length):
+            # エピソード終了を考慮しつつ行動と観測を受け取りながら推論
+            prev_action = action[l] * nonterms[l]
+            prior_logit, posterior_logit, rnn_hidden = self.rssm(
+                prev_state, prev_action, rnn_hidden, embedded_obs[l], nonterms[l]
+            )
+            prev_state = self.rssm.get_stoch_state(posterior_logit)
+
+            # 保存
+            states.append(prev_state)
+            rnn_hiddens.append(rnn_hidden)
+            prior_logits.append(prior_logit)
+            posterior_logits.append(posterior_logit)
+
+        states = torch.stack(states, dim=0)
+        rnn_hiddens = torch.stack(rnn_hiddens, dim=0)
+        prior_logits = torch.stack(prior_logits, dim=0)
+        posterior_logits = torch.stack(posterior_logits, dim=0)
+
+        return prior_logits, posterior_logits, states, rnn_hiddens
+
+    def _obs_loss(self, obs_dist, obs):
+        """
+        観測の対数尤度ロス
+        """
+        obs_loss = -torch.mean(obs_dist.log_prob(obs))
+        return obs_loss
+
+    def _kl_loss(self, prior_logit, posterior_logit):
+        """
+        prior-posterior間のKL-divergenceロス
+        kl-balancingあり
+        """
+        prior_dist = self.rssm.get_dist(prior_logit)
+        posterior_dist = self.rssm.get_dist(posterior_logit)
+        alpha = self.kl_balance_scale
+        kl_lhs = torch.mean(
+            torch.distributions.kl.kl_divergence(
+                self.rssm.get_dist(posterior_logit.detach()), prior_dist
+            )
+        )
+
+        kl_rhs = torch.mean(
+            torch.distributions.kl.kl_divergence(
+                posterior_dist, self.rssm.get_dist(prior_logit.detach())
+            )
+        )
+        # KL誤差がfree_nats以下の時は無視
+        # kl_lhs = torch.max(kl_lhs, kl_lhs.new_full(kl_lhs.size(), self.free_nats))
+        # kl_rhs = torch.max(kl_rhs, kl_rhs.new_full(kl_rhs.size(), self.free_nats))
+        kl_loss = alpha * kl_lhs + (1 - alpha) * kl_rhs
+        return kl_loss, prior_dist, posterior_dist
+
+    def _reward_loss(self, reward_dist, rewards):
+        """
+        報酬の対数尤度ロス
+        """
+        reward_loss = -torch.mean(reward_dist.log_prob(rewards))
+        return reward_loss
+
+    def _pcont_loss(self, pcont_dist, nonterms):
+        """
+        discount(0-1)の対数尤度ロス
+        """
+        pcont_target = nonterms.float()
+        pcont_loss = -torch.mean(pcont_dist.log_prob(pcont_target))
+        return pcont_loss
+
     def actor_critic_loss(self, states, rnn_hiddens):
         """
         Actor Criticのロス計算
@@ -185,8 +317,11 @@ class Trainer(object):
         # 今までの勾配を遮断
         with torch.no_grad():
             # [chunk,batch,*] -> [chunk-1*batch,*]
+            # chunk-1にしないとうまく学習しなかったけど、なんで？
             flatten_states = states[:-1].view(-1, self.state_dim).detach()
-            flatten_rnn_hiddens = rnn_hiddens[:-1].view(-1, self.rnn_hidden_dim).detach()
+            flatten_rnn_hiddens = (
+                rnn_hiddens[:-1].view(-1, self.rnn_hidden_dim).detach()
+            )
 
         # 世界モデルのパラメータは凍結
         with FreezeParameters(
@@ -383,138 +518,6 @@ class Trainer(object):
             value_discount * value_dist.log_prob(value_target).unsqueeze(-1)
         )
         return value_loss
-
-    def representation_loss(self, obs, actions, rewards, nonterms):
-        """
-        世界モデルのロス計算
-        """
-        # 観測のエンコード
-        embed = self.encoder(obs)
-
-        # サンプルしたデータからrssm状態を構築
-        (
-            prior_logits,
-            posterior_logits,
-            states,
-            rnn_hiddens,
-        ) = self.predict_states(embed, actions, nonterms)
-
-        # 観測、報酬、episode終了の0-1を再構成
-        obs_dist = self.decoder(states[:-1], rnn_hiddens[:-1])
-        reward_dist = self.reward_model(states[:-1], rnn_hiddens[:-1])
-        pcont_dist = self.discount_model(states[:-1], rnn_hiddens[:-1])
-
-        # ロスを計算
-        obs_loss = self._obs_loss(obs_dist, obs[:-1])  # 復元した状態と観測の間のロス
-        reward_loss = self._reward_loss(reward_dist, rewards[1:])  # 次ステップの報酬との比較
-        pcont_loss = self._pcont_loss(pcont_dist, nonterms[1:])  # 次ステップのdoneとの比較
-        kl_loss, prior_dist, post_dist = self._kl_loss(
-            prior_logits, posterior_logits
-        )  # prior-posterior間のKL-Loss
-
-        model_loss = (
-            self.kl_loss_scale * kl_loss
-            + self.reward_loss_scale * reward_loss
-            + obs_loss
-            + self.discount_loss_scale * pcont_loss
-        )
-
-        return (
-            model_loss,
-            kl_loss,
-            obs_loss,
-            reward_loss,
-            pcont_loss,
-            prior_dist,
-            post_dist,
-            states,
-            rnn_hiddens,
-        )
-
-    def predict_states(self, embedded_obs, action, nonterms):
-        """
-        観測データを取り込んでchunk_length分の状態表現を推論
-        """
-        # 低次元の状態表現保持のためのTensor
-        states = []
-        rnn_hiddens = []
-        prior_logits = []
-        posterior_logits = []
-
-        # rssm状態の初期値
-        state = torch.zeros(self.batch_size, self.state_dim, device=self.device)
-        rnn_hidden = torch.zeros(
-            self.batch_size, self.rnn_hidden_dim, device=self.device
-        )
-
-        prev_state = state
-        for l in range(self.chunk_length):
-            # エピソード終了を考慮しつつ行動と観測を受け取りながら推論
-            prev_action = action[l] * nonterms[l]
-            prior_logit, posterior_logit, rnn_hidden = self.rssm(
-                prev_state, prev_action, rnn_hidden, embedded_obs[l], nonterms[l]
-            )
-            prev_state = self.rssm.get_stoch_state(posterior_logit)
-
-            # 保存
-            states.append(prev_state)
-            rnn_hiddens.append(rnn_hidden)
-            prior_logits.append(prior_logit)
-            posterior_logits.append(posterior_logit)
-
-        states = torch.stack(states, dim=0)
-        rnn_hiddens = torch.stack(rnn_hiddens, dim=0)
-        prior_logits = torch.stack(prior_logits, dim=0)
-        posterior_logits = torch.stack(posterior_logits, dim=0)
-
-        return prior_logits, posterior_logits, states, rnn_hiddens
-
-    def _obs_loss(self, obs_dist, obs):
-        """
-        観測の対数尤度ロス
-        """
-        obs_loss = -torch.mean(obs_dist.log_prob(obs))
-        return obs_loss
-
-    def _kl_loss(self, prior_logit, posterior_logit):
-        """
-        prior-posterior間のKL-divergenceロス
-        kl-balancingあり
-        """
-        prior_dist = self.rssm.get_dist(prior_logit)
-        posterior_dist = self.rssm.get_dist(posterior_logit)
-        alpha = self.kl_balance_scale
-        kl_lhs = torch.mean(
-            torch.distributions.kl.kl_divergence(
-                self.rssm.get_dist(posterior_logit.detach()), prior_dist
-            )
-        )
-
-        kl_rhs = torch.mean(
-            torch.distributions.kl.kl_divergence(
-                posterior_dist, self.rssm.get_dist(prior_logit.detach())
-            )
-        )
-        # KL誤差がfree_nats以下の時は無視
-        # kl_lhs = torch.max(kl_lhs, kl_lhs.new_full(kl_lhs.size(), self.free_nats))
-        # kl_rhs = torch.max(kl_rhs, kl_rhs.new_full(kl_rhs.size(), self.free_nats))
-        kl_loss = alpha * kl_lhs + (1 - alpha) * kl_rhs
-        return kl_loss, prior_dist, posterior_dist
-
-    def _reward_loss(self, reward_dist, rewards):
-        """
-        報酬の対数尤度ロス
-        """
-        reward_loss = -torch.mean(reward_dist.log_prob(rewards))
-        return reward_loss
-
-    def _pcont_loss(self, pcont_dist, nonterms):
-        """
-        discount(0-1)の対数尤度ロス
-        """
-        pcont_target = nonterms.float()
-        pcont_loss = -torch.mean(pcont_dist.log_prob(pcont_target))
-        return pcont_loss
 
     def update_target(self):
         """
